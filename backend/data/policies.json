@@ -1,0 +1,52 @@
+[
+  {
+    "id": "policy-knee-replacement",
+    "procedure": "Knee Replacement",
+    "allowedDiagnoses": ["Osteoarthritis"],
+    "minDurationMonths": 6,
+    "ageMin": 50,
+    "ageMax": 80,
+    "policyClause": "Total knee replacement is eligible when osteoarthritis is documented, conservative management has failed, symptoms persist for at least six months, and the member is between 50 and 80 years old.",
+    "source": "Orthopedic Surgical Benefits Manual 2026"
+  },
+  {
+    "id": "policy-spinal-fusion",
+    "procedure": "Spinal Fusion",
+    "allowedDiagnoses": ["Degenerative Disc Disease"],
+    "minDurationMonths": 4,
+    "ageMin": 35,
+    "ageMax": 75,
+    "policyClause": "Spinal fusion is covered for degenerative disc disease after four or more months of persistent symptoms, failed non-operative treatment, and an eligible member age between 35 and 75.",
+    "source": "Neurosurgical Coverage Guide 2026"
+  },
+  {
+    "id": "policy-cataract-surgery",
+    "procedure": "Cataract Surgery",
+    "allowedDiagnoses": ["Cataract"],
+    "minDurationMonths": 2,
+    "ageMin": 45,
+    "ageMax": 95,
+    "policyClause": "Cataract surgery is approved when cataract diagnosis is confirmed, visual impairment is clinically significant, symptoms have been noted for at least two months, and the member is between 45 and 95 years old.",
+    "source": "Ophthalmology Authorization Handbook 2026"
+  },
+  {
+    "id": "policy-hip-arthroscopy",
+    "procedure": "Hip Arthroscopy",
+    "allowedDiagnoses": ["Labral Tear"],
+    "minDurationMonths": 3,
+    "ageMin": 18,
+    "ageMax": 60,
+    "policyClause": "Hip arthroscopy is eligible for labral tear when imaging supports the diagnosis, symptoms continue for at least three months despite therapy, and the patient is 18 to 60 years old.",
+    "source": "Musculoskeletal Procedure Policy Set 2026"
+  },
+  {
+    "id": "policy-rotator-cuff-repair",
+    "procedure": "Rotator Cuff Repair",
+    "allowedDiagnoses": ["Rotator Cuff Tear"],
+    "minDurationMonths": 3,
+    "ageMin": 21,
+    "ageMax": 70,
+    "policyClause": "Rotator cuff repair is covered when a rotator cuff tear is documented, symptoms remain unresolved after at least three months of conservative management, and the member is 21 to 70 years old.",
+    "source": "Upper Limb Surgical Criteria 2026"
+  }
+]
