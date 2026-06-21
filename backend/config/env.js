@@ -6,6 +6,31 @@ dotenv.config({
   path: path.resolve(__dirname, "..", ".env"),
 });
 
+function parseBooleanEnv(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+
+    if (normalized === "true") {
+      return true;
+    }
+
+    if (normalized === "false") {
+      return false;
+    }
+  }
+
+  return value;
+}
+
+function normalizeOptionalSecret(value) {
+  const normalized = String(value || "").trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function splitConnectionUrl(rawUrl) {
   const schemeMatch = rawUrl.match(/^(postgres(?:ql)?):\/\//i);
 
@@ -83,17 +108,42 @@ function normalizeDatabaseUrl(rawUrl) {
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(5000),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required."),
-  GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required."),
-  PINECONE_API_KEY: z.string().min(1, "PINECONE_API_KEY is required."),
+  GEMINI_API_KEY: z.string().optional().default(""),
+  PINECONE_API_KEY: z.string().optional().default(""),
   CLIENT_ORIGIN: z.string().url().default("http://localhost:5173"),
   MANUAL_REVIEW_THRESHOLD: z.coerce.number().min(0).max(1).default(0.75),
   POLICY_MATCH_THRESHOLD: z.coerce.number().min(0).max(1).default(0.55),
   PINECONE_INDEX_NAME: z.string().default("insurance-policies"),
   PINECONE_NAMESPACE: z.string().default("authclear-policies"),
-  GEMINI_TEXT_MODEL: z.string().default("gemini-2.0-flash"),
-  GEMINI_EMBEDDING_MODEL: z.string().default("text-embedding-004"),
+  GEMINI_TEXT_MODEL: z.string().default("gemini-2.5-flash-lite"),
+  GEMINI_EMBEDDING_MODEL: z.string().default("gemini-embedding-001"),
   PINECONE_CLOUD: z.string().default("aws"),
   PINECONE_REGION: z.string().default("us-east-1"),
+  ALLOW_DEGRADED_AI_FALLBACK: z
+    .preprocess(parseBooleanEnv, z.boolean())
+    .default(true),
+}).superRefine((data, context) => {
+  if (data.ALLOW_DEGRADED_AI_FALLBACK) {
+    return;
+  }
+
+  if (!String(data.GEMINI_API_KEY || "").trim()) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["GEMINI_API_KEY"],
+      message:
+        "GEMINI_API_KEY is required when ALLOW_DEGRADED_AI_FALLBACK is false.",
+    });
+  }
+
+  if (!String(data.PINECONE_API_KEY || "").trim()) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["PINECONE_API_KEY"],
+      message:
+        "PINECONE_API_KEY is required when ALLOW_DEGRADED_AI_FALLBACK is false.",
+    });
+  }
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -108,8 +158,8 @@ if (!parsed.success) {
 const env = {
   port: parsed.data.PORT,
   databaseUrl: normalizeDatabaseUrl(parsed.data.DATABASE_URL),
-  geminiApiKey: parsed.data.GEMINI_API_KEY,
-  pineconeApiKey: parsed.data.PINECONE_API_KEY,
+  geminiApiKey: normalizeOptionalSecret(parsed.data.GEMINI_API_KEY),
+  pineconeApiKey: normalizeOptionalSecret(parsed.data.PINECONE_API_KEY),
   clientOrigin: parsed.data.CLIENT_ORIGIN,
   manualReviewThreshold: parsed.data.MANUAL_REVIEW_THRESHOLD,
   policyMatchThreshold: parsed.data.POLICY_MATCH_THRESHOLD,
@@ -119,6 +169,7 @@ const env = {
   geminiEmbeddingModel: parsed.data.GEMINI_EMBEDDING_MODEL,
   pineconeCloud: parsed.data.PINECONE_CLOUD,
   pineconeRegion: parsed.data.PINECONE_REGION,
+  allowDegradedAiFallback: parsed.data.ALLOW_DEGRADED_AI_FALLBACK,
 };
 
 module.exports = {

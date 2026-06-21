@@ -8,9 +8,18 @@ let embeddings;
 
 function getEmbeddingsClient() {
   if (!embeddings) {
+    if (!env.geminiApiKey) {
+      const error = new Error("GEMINI_API_KEY is not configured.");
+      error.code = "MISSING_API_KEY";
+      throw error;
+    }
+
     embeddings = new GoogleGenerativeAIEmbeddings({
       apiKey: env.geminiApiKey,
       model: env.geminiEmbeddingModel,
+      // gemini-embedding-001 defaults to 3072 dims; pin to 768 to match the
+      // existing Pinecone index dimension (uses MRL truncation).
+      outputDimensionality: EMBEDDING_DIMENSION,
     });
   }
 

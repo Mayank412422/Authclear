@@ -20,6 +20,11 @@ function DecisionCard({ decision, metadata }) {
             <span className="rounded-full border border-white/20 bg-white/10 px-4 py-2 font-mono text-xs uppercase tracking-[0.24em] text-sand">
               {decision.status}
             </span>
+            {metadata.degraded ? (
+              <span className="rounded-full border border-wheat/40 bg-white/10 px-4 py-2 font-mono text-xs uppercase tracking-[0.24em] text-wheat">
+                Degraded Mode
+              </span>
+            ) : null}
             {decision.manualReview ? (
               <span className="rounded-full border border-wheat/40 bg-wheat/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.24em] text-wheat">
                 Manual Review

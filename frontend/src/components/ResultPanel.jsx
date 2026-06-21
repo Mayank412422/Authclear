@@ -22,6 +22,10 @@ function ResultPanel({ result }) {
     return <EmptyState />;
   }
 
+  const extractionMode = result.metadata?.extraction?.mode;
+  const extractionLabel =
+    extractionMode === "fallback-unavailable" ? "Unavailable" : "AI output";
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 18 }}
@@ -42,7 +46,7 @@ function ResultPanel({ result }) {
           <div className="mb-3 flex items-center justify-between">
             <h3 className="font-display text-xl">Extracted JSON</h3>
             <span className="font-mono text-xs uppercase tracking-[0.2em] text-sand/55">
-              AI output
+              {extractionLabel}
             </span>
           </div>
           <pre className="overflow-x-auto rounded-2xl bg-black/20 p-4 font-mono text-xs leading-6 text-sand/90">

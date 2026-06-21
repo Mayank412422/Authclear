@@ -7,8 +7,28 @@ const { normalizeText } = require("../utils/validator");
 
 let pinecone;
 
+function sanitizeFallbackReason(reason) {
+  const normalized = String(reason || "").replace(/\s+/g, " ").trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.length <= 220) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 217)}...`;
+}
+
 function getPineconeClient() {
   if (!pinecone) {
+    if (!env.pineconeApiKey) {
+      const error = new Error("PINECONE_API_KEY is not configured.");
+      error.code = "MISSING_API_KEY";
+      throw error;
+    }
+
     pinecone = new Pinecone({
       apiKey: env.pineconeApiKey,
     });
@@ -21,10 +41,11 @@ function buildPolicyChunk(policy) {
   return [
     `Procedure: ${policy.procedure}`,
     `Covered diagnoses: ${policy.allowedDiagnoses.join(", ")}`,
+    policy.keywords?.length ? `Keywords: ${policy.keywords.join(", ")}` : null,
     `Minimum symptom duration: ${policy.minDurationMonths} months`,
     `Eligible age range: ${policy.ageMin} to ${policy.ageMax}`,
     `Clause: ${policy.policyClause}`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function buildQueryText(extractedData) {
@@ -38,6 +59,37 @@ function buildQueryText(extractedData) {
 
 function normalizeScore(score) {
   return Math.max(0, Math.min(score || 0, 1));
+}
+
+function tokenize(value) {
+  return normalizeText(value)
+    .split(" ")
+    .filter((token) => token.length > 1);
+}
+
+function hasMeaningfulOverlap(left, right) {
+  const leftTokens = new Set(tokenize(left));
+  const rightTokens = new Set(tokenize(right));
+
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function phraseMatches(policyValue, extractedValue) {
+  const policyNormalized = normalizeText(policyValue);
+  const extractedNormalized = normalizeText(extractedValue);
+
+  return (
+    policyNormalized === extractedNormalized ||
+    policyNormalized.includes(extractedNormalized) ||
+    extractedNormalized.includes(policyNormalized) ||
+    hasMeaningfulOverlap(policyNormalized, extractedNormalized)
+  );
 }
 
 function mapPolicyMetadata(record) {
@@ -54,6 +106,8 @@ function mapPolicyMetadata(record) {
     procedureNormalized: metadata.procedureNormalized,
     allowedDiagnoses: metadata.allowedDiagnoses || [],
     allowedDiagnosesNormalized: metadata.allowedDiagnosesNormalized || [],
+    keywords: metadata.keywords || [],
+    keywordsNormalized: metadata.keywordsNormalized || [],
     minDurationMonths: Number(metadata.minDurationMonths),
     ageMin: Number(metadata.ageMin),
     ageMax: Number(metadata.ageMax),
@@ -65,19 +119,22 @@ function mapPolicyMetadata(record) {
 function rankCandidate(candidate, extractedData) {
   let rankingScore = candidate.score;
 
-  if (
-    candidate.procedureNormalized === normalizeText(extractedData.requestedProcedure)
-  ) {
+  if (phraseMatches(candidate.procedure, extractedData.requestedProcedure)) {
     rankingScore += 0.2;
   }
 
-  if (
-    candidate.allowedDiagnosesNormalized.includes(
-      normalizeText(extractedData.diagnosis)
-    )
-  ) {
+  if (candidate.allowedDiagnoses.some((diagnosis) => {
+    return phraseMatches(diagnosis, extractedData.diagnosis);
+  })) {
     rankingScore += 0.15;
   }
+
+  const queryText = buildQueryText(extractedData);
+  const keywordMatches = (candidate.keywords || []).filter((keyword) => {
+    return phraseMatches(keyword, queryText);
+  }).length;
+
+  rankingScore += Math.min(keywordMatches * 0.05, 0.2);
 
   return rankingScore;
 }
@@ -90,6 +147,8 @@ function createPolicyCandidate(policy, score, retrievalMode, fallbackReason = nu
     procedureNormalized: normalizeText(policy.procedure),
     allowedDiagnoses: policy.allowedDiagnoses,
     allowedDiagnosesNormalized: policy.allowedDiagnoses.map(normalizeText),
+    keywords: policy.keywords || [],
+    keywordsNormalized: (policy.keywords || []).map(normalizeText),
     minDurationMonths: Number(policy.minDurationMonths),
     ageMin: Number(policy.ageMin),
     ageMax: Number(policy.ageMax),
@@ -107,18 +166,24 @@ function scoreLocalPolicy(policy, extractedData) {
   const policyProcedure = normalizeText(policy.procedure);
   const allowedDiagnoses = policy.allowedDiagnoses.map(normalizeText);
 
-  if (policyProcedure === normalizedProcedure) {
+  if (phraseMatches(policy.procedure, extractedData.requestedProcedure)) {
     score += 0.55;
-  } else if (
-    policyProcedure.includes(normalizedProcedure) ||
-    normalizedProcedure.includes(policyProcedure)
-  ) {
+  } else if (policyProcedure.includes(normalizedProcedure) || normalizedProcedure.includes(policyProcedure)) {
     score += 0.25;
   }
 
-  if (allowedDiagnoses.includes(normalizedDiagnosis)) {
+  if (policy.allowedDiagnoses.some((diagnosis) => {
+    return phraseMatches(diagnosis, extractedData.diagnosis);
+  })) {
     score += 0.25;
   }
+
+  const queryText = buildQueryText(extractedData);
+  const keywordMatches = (policy.keywords || []).filter((keyword) => {
+    return phraseMatches(keyword, queryText);
+  }).length;
+
+  score += Math.min(keywordMatches * 0.05, 0.25);
 
   if (extractedData.symptomDuration >= policy.minDurationMonths) {
     score += 0.03;
@@ -132,13 +197,14 @@ function scoreLocalPolicy(policy, extractedData) {
 }
 
 function retrieveLocalPolicy(extractedData, fallbackReason) {
+  const sanitizedReason = sanitizeFallbackReason(fallbackReason);
   const candidates = policyCatalog
     .map((policy) =>
       createPolicyCandidate(
         policy,
         scoreLocalPolicy(policy, extractedData),
         "local-catalog",
-        fallbackReason
+        sanitizedReason
       )
     )
     .sort((left, right) => {
@@ -221,6 +287,8 @@ async function syncPolicyCatalog(options = {}) {
           procedureNormalized: normalizeText(policy.procedure),
           allowedDiagnoses: policy.allowedDiagnoses,
           allowedDiagnosesNormalized: policy.allowedDiagnoses.map(normalizeText),
+          keywords: policy.keywords || [],
+          keywordsNormalized: (policy.keywords || []).map(normalizeText),
           minDurationMonths: policy.minDurationMonths,
           ageMin: policy.ageMin,
           ageMax: policy.ageMax,
@@ -243,7 +311,8 @@ async function syncPolicyCatalog(options = {}) {
       indexed: false,
       count: policyCatalog.length,
       mode: "local-catalog",
-      error: error.message,
+      error: sanitizeFallbackReason(error.message),
+      errorCode: error.code || null,
     };
   }
 }

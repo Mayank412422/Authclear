@@ -3,7 +3,7 @@ const cors = require("cors");
 
 const { env } = require("./config/env");
 const claimRoutes = require("./routes/claim");
-const { getStartupStatus } = require("./services/bootstrap");
+const { getStartupStatus, warmupDependencies } = require("./services/bootstrap");
 
 async function startServer() {
   const app = express();
@@ -47,6 +47,8 @@ async function startServer() {
       details: error.details || undefined,
     });
   });
+
+  await warmupDependencies();
 
   await new Promise((resolve, reject) => {
     const server = app.listen(env.port, () => {

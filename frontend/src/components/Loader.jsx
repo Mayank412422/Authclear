@@ -24,8 +24,8 @@ function Loader() {
         Analyzing Claim with AI...
       </p>
       <p className="mt-3 max-w-md text-sm leading-6 text-sand/70">
-        Gemini extraction, Pinecone retrieval, and deterministic approval logic are
-        running in sequence.
+        Gemini extraction, policy retrieval, and
+        deterministic approval logic are running in sequence.
       </p>
     </motion.div>
   );

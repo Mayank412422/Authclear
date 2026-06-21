@@ -15,8 +15,15 @@ function PolicyViewer({ policy }) {
             Match score {(policy.score * 100).toFixed(0)}%
           </p>
         </div>
-        <div className="rounded-full border border-sand/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.2em] text-sand/70">
-          {policy.procedure}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {policy.retrievalMode !== "pinecone" ? (
+            <div className="rounded-full border border-wheat/35 bg-wheat/10 px-4 py-2 font-mono text-xs uppercase tracking-[0.2em] text-wheat">
+              Local Retrieval
+            </div>
+          ) : null}
+          <div className="rounded-full border border-sand/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.2em] text-sand/70">
+            {policy.procedure}
+          </div>
         </div>
       </div>
 

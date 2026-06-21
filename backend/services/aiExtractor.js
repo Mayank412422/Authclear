@@ -24,65 +24,144 @@ Rules:
 `.trim();
 
 let extractor;
-const FALLBACK_CONFIDENCE = 0.38;
-const FALLBACK_PROFILES = [
-  {
-    diagnosis: "Osteoarthritis",
-    requestedProcedure: "Knee Replacement",
-    minAge: 52,
-    maxAge: 76,
-    minDuration: 6,
-    maxDuration: 11,
-  },
-  {
-    diagnosis: "Degenerative Disc Disease",
-    requestedProcedure: "Spinal Fusion",
-    minAge: 39,
-    maxAge: 72,
-    minDuration: 4,
-    maxDuration: 9,
-  },
-  {
-    diagnosis: "Cataract",
-    requestedProcedure: "Cataract Surgery",
-    minAge: 48,
-    maxAge: 84,
-    minDuration: 2,
-    maxDuration: 5,
-  },
-  {
-    diagnosis: "Labral Tear",
-    requestedProcedure: "Hip Arthroscopy",
-    minAge: 22,
-    maxAge: 57,
-    minDuration: 3,
-    maxDuration: 7,
-  },
-  {
-    diagnosis: "Rotator Cuff Tear",
-    requestedProcedure: "Rotator Cuff Repair",
-    minAge: 28,
-    maxAge: 66,
-    minDuration: 3,
-    maxDuration: 8,
-  },
-];
+
+const FALLBACK_CONFIDENCE = 0.1;
+const EXTRACTION_PROVIDER = "gemini";
+const MAX_REASON_LENGTH = 220;
+const FALLBACK_REASON_CODES = new Set([
+  "missing_api_key",
+  "quota_exceeded",
+  "rate_limited",
+  "timeout",
+  "network_error",
+  "model_unavailable",
+  "provider_unavailable",
+]);
 
 function resolveGeminiTextModel(modelName) {
-  if (modelName === "gemini-1.5-flash") {
-    return "gemini-2.0-flash";
+  return modelName;
+}
+
+function trimReason(reason) {
+  if (!reason) {
+    return null;
   }
 
-  return modelName;
+  const normalized = String(reason).replace(/\s+/g, " ").trim();
+
+  if (normalized.length <= MAX_REASON_LENGTH) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, MAX_REASON_LENGTH - 3)}...`;
+}
+
+function createExtractionMeta({
+  mode,
+  degraded,
+  reasonCode = null,
+  reason = null,
+}) {
+  return {
+    mode,
+    degraded,
+    provider: EXTRACTION_PROVIDER,
+    reasonCode,
+    reason: trimReason(reason),
+  };
+}
+
+function createMissingApiKeyError() {
+  const error = new Error("GEMINI_API_KEY is not configured.");
+  error.code = "MISSING_API_KEY";
+  return error;
+}
+
+function classifyExtractionError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  const code = String(error?.code || "").toLowerCase();
+  const name = String(error?.name || "").toLowerCase();
+
+  if (
+    code === "missing_api_key" ||
+    message.includes("gemini_api_key is not configured")
+  ) {
+    return "missing_api_key";
+  }
+
+  if (
+    message.includes("quota exceeded") ||
+    message.includes("current quota") ||
+    message.includes("free tier") ||
+    message.includes("billing details")
+  ) {
+    return "quota_exceeded";
+  }
+
+  if (
+    message.includes("429") ||
+    message.includes("rate limit") ||
+    message.includes("too many requests") ||
+    message.includes("retry in")
+  ) {
+    return "rate_limited";
+  }
+
+  if (
+    code.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("deadline exceeded") ||
+    message.includes("etimedout") ||
+    message.includes("timeout")
+  ) {
+    return "timeout";
+  }
+
+  if (
+    message.includes("fetch failed") ||
+    message.includes("network") ||
+    message.includes("socket hang up") ||
+    code === "enotfound" ||
+    code === "econnreset" ||
+    code === "econnrefused"
+  ) {
+    return "network_error";
+  }
+
+  if (
+    message.includes("model not found") ||
+    message.includes("unknown model") ||
+    message.includes("unsupported model")
+  ) {
+    return "model_unavailable";
+  }
+
+  if (
+    message.includes("service unavailable") ||
+    message.includes("temporarily unavailable") ||
+    message.includes("unavailable") ||
+    message.includes("internal server error") ||
+    message.includes("503")
+  ) {
+    return "provider_unavailable";
+  }
+
+  if (name === "zoderror" || message.includes("invalid json")) {
+    return "invalid_response";
+  }
+
+  return "unknown";
 }
 
 function getExtractor() {
   if (!extractor) {
-    const resolvedModel = resolveGeminiTextModel(env.geminiTextModel);
+    if (!env.geminiApiKey) {
+      throw createMissingApiKeyError();
+    }
 
     const model = new ChatGoogleGenerativeAI({
       apiKey: env.geminiApiKey,
-      model: resolvedModel,
+      model: resolveGeminiTextModel(env.geminiTextModel),
       temperature: 0,
       maxRetries: 2,
     });
@@ -96,50 +175,45 @@ function getExtractor() {
   return extractor;
 }
 
-function getSeed(buffer) {
-  return Array.from(buffer).reduce((total, value, index) => {
-    return (total + value * (index + 17)) % 1000003;
-  }, buffer.length || 1);
+function toInteger(value) {
+  if (typeof value === "number") {
+    return Math.trunc(value);
+  }
+
+  const parsed = Number.parseInt(String(value ?? "").replace(/[^\d-]/g, ""), 10);
+  return Number.isFinite(parsed) ? parsed : value;
 }
 
-function pickRangeValue(seed, min, max, offset) {
-  const span = max - min + 1;
-  return min + ((seed + offset) % span);
+function toConfidence(value) {
+  if (typeof value === "number") {
+    return value;
+  }
+
+  const parsed = Number.parseFloat(String(value ?? "").replace(/[^\d.]/g, ""));
+  return Number.isFinite(parsed) ? parsed : value;
 }
 
-function createFallbackExtraction(buffer) {
-  const seed = getSeed(buffer);
-  const profile = FALLBACK_PROFILES[seed % FALLBACK_PROFILES.length];
-
+function normalizeStructuredExtraction(result) {
   return {
-    patientId: `PT-${String(100000 + (seed % 900000))}`,
-    diagnosis: profile.diagnosis,
-    symptomDuration: pickRangeValue(
-      seed,
-      profile.minDuration,
-      profile.maxDuration,
-      29
-    ),
-    requestedProcedure: profile.requestedProcedure,
-    age: pickRangeValue(seed, profile.minAge, profile.maxAge, 71),
-    confidence: FALLBACK_CONFIDENCE,
+    ...result,
+    patientId: String(result?.patientId ?? "").trim(),
+    diagnosis: String(result?.diagnosis ?? "").trim(),
+    symptomDuration: toInteger(result?.symptomDuration),
+    requestedProcedure: String(result?.requestedProcedure ?? "").trim(),
+    age: toInteger(result?.age),
+    confidence: toConfidence(result?.confidence),
   };
 }
 
-function shouldUseFallbackExtraction(error) {
-  const message = String(error?.message || "").toLowerCase();
-
-  return (
-    message.includes("429") ||
-    message.includes("quota") ||
-    message.includes("rate limit") ||
-    message.includes("too many requests") ||
-    message.includes("model") ||
-    message.includes("not found") ||
-    message.includes("timed out") ||
-    message.includes("fetch failed") ||
-    message.includes("unavailable")
-  );
+function createUnavailableExtraction() {
+  return {
+    patientId: "Unknown patient",
+    diagnosis: "Unknown diagnosis",
+    symptomDuration: 0,
+    requestedProcedure: "Unknown procedure",
+    age: 0,
+    confidence: FALLBACK_CONFIDENCE,
+  };
 }
 
 async function extractClaimData({ buffer, mimeType }) {
@@ -160,32 +234,53 @@ async function extractClaimData({ buffer, mimeType }) {
       }),
     ]);
 
-    return claimExtractionSchema.parse(result);
-  } catch (error) {
-    if (shouldUseFallbackExtraction(error)) {
-      console.warn(
-        "[AuthClear] Gemini extraction fallback enabled.",
-        {
-          model: resolveGeminiTextModel(env.geminiTextModel),
-          reason: error.message,
-        }
-      );
+    console.log("[Gemini Raw Response]", result);
 
-      return createFallbackExtraction(buffer);
+    return {
+      data: claimExtractionSchema.parse(normalizeStructuredExtraction(result)),
+      meta: createExtractionMeta({
+        mode: "gemini",
+        degraded: false,
+      }),
+    };
+  } catch (error) {
+    const reasonCode = classifyExtractionError(error);
+
+    if (env.allowDegradedAiFallback && FALLBACK_REASON_CODES.has(reasonCode)) {
+      const meta = createExtractionMeta({
+        mode: "fallback-unavailable",
+        degraded: true,
+        reasonCode,
+        reason: error.message,
+      });
+
+      console.warn("[AuthClear] Gemini extraction unavailable.", {
+        provider: EXTRACTION_PROVIDER,
+        model: resolveGeminiTextModel(env.geminiTextModel),
+        mode: meta.mode,
+        reasonCode: meta.reasonCode,
+        reason: meta.reason,
+      });
+
+      return {
+        data: createUnavailableExtraction(),
+        meta,
+      };
     }
 
-    const wrapped = new Error(
-      "Gemini extraction failed or returned invalid JSON."
-    );
+    const wrapped = new Error("Gemini extraction failed or returned invalid JSON.");
     wrapped.statusCode = 502;
     wrapped.details = {
+      provider: EXTRACTION_PROVIDER,
       model: resolveGeminiTextModel(env.geminiTextModel),
-      error: error.message,
+      reasonCode,
+      error: trimReason(error.message),
     };
     throw wrapped;
   }
 }
 
 module.exports = {
+  classifyExtractionError,
   extractClaimData,
 };

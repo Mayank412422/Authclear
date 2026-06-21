@@ -1,10 +1,38 @@
 const { normalizeText } = require("../utils/validator");
 
-function evaluateClaim(extractedData, policy) {
-  const normalizedProcedure = normalizeText(extractedData.requestedProcedure);
-  const normalizedDiagnosis = normalizeText(extractedData.diagnosis);
+function tokenize(value) {
+  return normalizeText(value)
+    .split(" ")
+    .filter((token) => token.length > 1);
+}
 
-  if (policy.procedureNormalized !== normalizedProcedure) {
+function hasMeaningfulOverlap(left, right) {
+  const leftTokens = new Set(tokenize(left));
+  const rightTokens = new Set(tokenize(right));
+
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function phraseMatches(policyValue, extractedValue) {
+  const policyNormalized = normalizeText(policyValue);
+  const extractedNormalized = normalizeText(extractedValue);
+
+  return (
+    policyNormalized === extractedNormalized ||
+    policyNormalized.includes(extractedNormalized) ||
+    extractedNormalized.includes(policyNormalized) ||
+    hasMeaningfulOverlap(policyNormalized, extractedNormalized)
+  );
+}
+
+function evaluateClaim(extractedData, policy) {
+  if (!phraseMatches(policy.procedure, extractedData.requestedProcedure)) {
     return {
       status: "DENIED",
       reason: `Requested procedure ${extractedData.requestedProcedure} does not match the retrieved coverage clause for ${policy.procedure}.`,
@@ -12,7 +40,9 @@ function evaluateClaim(extractedData, policy) {
     };
   }
 
-  if (!policy.allowedDiagnosesNormalized.includes(normalizedDiagnosis)) {
+  if (!policy.allowedDiagnoses.some((diagnosis) => {
+    return phraseMatches(diagnosis, extractedData.diagnosis);
+  })) {
     return {
       status: "DENIED",
       reason: `Diagnosis ${extractedData.diagnosis} is not covered for ${policy.procedure}.`,
