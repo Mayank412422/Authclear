@@ -31,6 +31,13 @@ function normalizeOptionalSecret(value) {
   return normalized.length > 0 ? normalized : null;
 }
 
+function normalizeOrigins(value) {
+  return String(value || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
 function splitConnectionUrl(rawUrl) {
   const schemeMatch = rawUrl.match(/^(postgres(?:ql)?):\/\//i);
 
@@ -110,7 +117,10 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required."),
   GEMINI_API_KEY: z.string().optional().default(""),
   PINECONE_API_KEY: z.string().optional().default(""),
-  CLIENT_ORIGIN: z.string().url().default("http://localhost:5173"),
+  CLIENT_ORIGIN: z
+    .string()
+    .min(1)
+    .default("http://localhost:5173,https://authclear.vercel.app"),
   MANUAL_REVIEW_THRESHOLD: z.coerce.number().min(0).max(1).default(0.75),
   POLICY_MATCH_THRESHOLD: z.coerce.number().min(0).max(1).default(0.55),
   PINECONE_INDEX_NAME: z.string().default("insurance-policies"),
@@ -160,7 +170,7 @@ const env = {
   databaseUrl: normalizeDatabaseUrl(parsed.data.DATABASE_URL),
   geminiApiKey: normalizeOptionalSecret(parsed.data.GEMINI_API_KEY),
   pineconeApiKey: normalizeOptionalSecret(parsed.data.PINECONE_API_KEY),
-  clientOrigin: parsed.data.CLIENT_ORIGIN,
+  clientOrigin: normalizeOrigins(parsed.data.CLIENT_ORIGIN),
   manualReviewThreshold: parsed.data.MANUAL_REVIEW_THRESHOLD,
   policyMatchThreshold: parsed.data.POLICY_MATCH_THRESHOLD,
   pineconeIndexName: parsed.data.PINECONE_INDEX_NAME,
