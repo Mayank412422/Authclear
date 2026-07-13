@@ -43,7 +43,7 @@ function loadExtractorWithEnv(envOverrides, invokeImpl) {
   restoreEnvironment();
   Object.assign(process.env, envOverrides);
   mockGoogleGenAi(invokeImpl);
-  delete require.cache[envModulePath];
+  delete require.cache[envModulePath]; 
   delete require.cache[extractorModulePath];
   return require(extractorModulePath);
 }
