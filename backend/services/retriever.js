@@ -252,7 +252,7 @@ async function ensurePolicyIndex() {
     });
   }
 
-  return client.index({ name: env.pineconeIndexName }).namespace(env.pineconeNamespace);
+  return client.index(env.pineconeIndexName).namespace(env.pineconeNamespace);
 }
 
 async function syncPolicyCatalog(options = {}) {
@@ -360,6 +360,10 @@ async function retrieveRelevantPolicy(extractedData) {
       })),
     };
   } catch (error) {
+    if (!env.allowDegradedAiFallback) {
+      throw error;
+    }
+
     return retrieveLocalPolicy(extractedData, error.message);
   }
 }
