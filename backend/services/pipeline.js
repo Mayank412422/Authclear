@@ -3,6 +3,7 @@ const { env } = require("../config/env");
 const { extractClaimData } = require("./aiExtractor");
 const { retrieveRelevantPolicy } = require("./retriever");
 const { evaluateClaim } = require("./decisionEngine");
+const { generateRagAnswer } = require("./ragGenerator");
 const { claimExtractionSchema } = require("../utils/validator");
 
 function createExtractionWarning(extractionMeta) {
@@ -19,6 +20,14 @@ function createRetrievalWarning(policy) {
   }
 
   return "Pinecone retrieval was unavailable for this request. AuthClear matched against the bundled local policy catalog.";
+}
+
+function createGenerationWarning(generationMeta) {
+  if (!generationMeta.degraded) {
+    return null;
+  }
+
+  return "Gemini answer generation was unavailable. AuthClear returned the deterministic decision explanation.";
 }
 
 function createLogger(logs) {
@@ -59,8 +68,6 @@ async function processClaim({ buffer, mimeType, fileName }) {
   const policy = await retrieveRelevantPolicy(extractedData);
   const extractionWarning = createExtractionWarning(extractionMeta);
   const retrievalWarning = createRetrievalWarning(policy);
-  const warnings = [extractionWarning, retrievalWarning].filter(Boolean);
-  const degraded = extractionMeta.degraded || policy.retrievalMode !== "pinecone";
 
   log("retrieval", "Relevant policy clause selected.", {
     policyId: policy.id,
@@ -69,12 +76,53 @@ async function processClaim({ buffer, mimeType, fileName }) {
     retrievalMode: policy.retrievalMode,
   });
 
-  const decision = evaluateClaim(extractedData, policy);
+  const deterministicDecision = evaluateClaim(extractedData, policy);
+  let generatedAnswer = deterministicDecision.reason;
+  let generationMeta = {
+    mode: "gemini",
+    degraded: false,
+    reason: null,
+  };
+
+  try {
+    generatedAnswer = await generateRagAnswer({
+      extractedData,
+      policy,
+      deterministicDecision,
+    });
+  } catch (error) {
+    if (!env.allowDegradedAiFallback) {
+      error.statusCode = error.statusCode || 502;
+      error.details = error.details || {
+        stage: "generation",
+        reason: error.message,
+      };
+      throw error;
+    }
+
+    generationMeta = {
+      mode: "fallback-deterministic",
+      degraded: true,
+      reason: error.message,
+    };
+
+    log("generation", "Fallback answer generation used.", {
+      reason: error.message,
+    }, "WARN");
+  }
+
+  const decision = {
+    ...deterministicDecision,
+    reason: generatedAnswer,
+    deterministicReason: deterministicDecision.reason,
+  };
+  const generationWarning = createGenerationWarning(generationMeta);
   const manualReview =
     extractionMeta.degraded ||
     extractedData.confidence < env.manualReviewThreshold ||
     policy.score < env.policyMatchThreshold ||
-    policy.retrievalMode !== "pinecone";
+    policy.retrievalMode !== "pinecone" ||
+    generationMeta.degraded;
 
   log("decision", "Deterministic decision completed.", {
     status: decision.status,
@@ -113,6 +161,9 @@ async function processClaim({ buffer, mimeType, fileName }) {
     }, "WARN");
   }
 
+  const warnings = [extractionWarning, retrievalWarning, generationWarning].filter(Boolean);
+  const degraded = extractionMeta.degraded || policy.retrievalMode !== "pinecone" || generationMeta.degraded;
+
   return {
     claimId: persisted.claimId,
     patientRecordId: persisted.patientRecordId,
@@ -141,6 +192,7 @@ async function processClaim({ buffer, mimeType, fileName }) {
       processingMode: degraded ? "degraded" : "full-ai",
       warnings,
       extraction: extractionMeta,
+      generation: generationMeta,
       processedAt: persisted.createdAt,
       persisted: persisted.persisted,
       persistenceWarning: persisted.warning,

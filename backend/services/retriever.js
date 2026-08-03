@@ -1,32 +1,42 @@
+const { performance } = require("node:perf_hooks");
 const { Pinecone } = require("@pinecone-database/pinecone");
 
 const { env } = require("../config/env");
 const policyCatalog = require("../data/policies.json");
 const { EMBEDDING_DIMENSION, embedPolicyChunks, embedQuery } = require("./embeddingService");
 const { normalizeText } = require("../utils/validator");
+const { log } = require("../utils/logger");
 
 let pinecone;
 
+const retrievalState = {
+  ready: false,
+  mode: "uninitialized",
+  indexExists: false,
+  vectorCount: 0,
+  lastSyncAt: null,
+  lastError: null,
+  fallbackActivated: false,
+};
+
 function sanitizeFallbackReason(reason) {
   const normalized = String(reason || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.length <= 220 ? normalized : `${normalized.slice(0, 217)}...`;
+}
 
-  if (!normalized) {
-    return null;
-  }
-
-  if (normalized.length <= 220) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, 217)}...`;
+function createRetrievalError(message, code = null, details = null) {
+  const error = new Error(message);
+  error.statusCode = 503;
+  error.code = code;
+  error.details = details || undefined;
+  return error;
 }
 
 function getPineconeClient() {
   if (!pinecone) {
     if (!env.pineconeApiKey) {
-      const error = new Error("PINECONE_API_KEY is not configured.");
-      error.code = "MISSING_API_KEY";
-      throw error;
+      throw createRetrievalError("PINECONE_API_KEY is not configured.", "MISSING_API_KEY");
     }
 
     pinecone = new Pinecone({
@@ -85,10 +95,10 @@ function phraseMatches(policyValue, extractedValue) {
   const extractedNormalized = normalizeText(extractedValue);
 
   return (
-    policyNormalized === extractedNormalized ||
-    policyNormalized.includes(extractedNormalized) ||
-    extractedNormalized.includes(policyNormalized) ||
-    hasMeaningfulOverlap(policyNormalized, extractedNormalized)
+    policyNormalized === extractedNormalized
+    || policyNormalized.includes(extractedNormalized)
+    || extractedNormalized.includes(policyNormalized)
+    || hasMeaningfulOverlap(policyNormalized, extractedNormalized)
   );
 }
 
@@ -113,6 +123,7 @@ function mapPolicyMetadata(record) {
     ageMax: Number(metadata.ageMax),
     clause: metadata.policyClause,
     score: normalizeScore(record.score),
+    chunkText: metadata.chunkText || metadata.policyClause,
   };
 }
 
@@ -123,17 +134,12 @@ function rankCandidate(candidate, extractedData) {
     rankingScore += 0.2;
   }
 
-  if (candidate.allowedDiagnoses.some((diagnosis) => {
-    return phraseMatches(diagnosis, extractedData.diagnosis);
-  })) {
+  if (candidate.allowedDiagnoses.some((diagnosis) => phraseMatches(diagnosis, extractedData.diagnosis))) {
     rankingScore += 0.15;
   }
 
   const queryText = buildQueryText(extractedData);
-  const keywordMatches = (candidate.keywords || []).filter((keyword) => {
-    return phraseMatches(keyword, queryText);
-  }).length;
-
+  const keywordMatches = (candidate.keywords || []).filter((keyword) => phraseMatches(keyword, queryText)).length;
   rankingScore += Math.min(keywordMatches * 0.05, 0.2);
 
   return rankingScore;
@@ -156,15 +162,14 @@ function createPolicyCandidate(policy, score, retrievalMode, fallbackReason = nu
     score: normalizeScore(score),
     retrievalMode,
     fallbackReason,
+    chunkText: buildPolicyChunk(policy),
   };
 }
 
 function scoreLocalPolicy(policy, extractedData) {
   let score = 0.15;
   const normalizedProcedure = normalizeText(extractedData.requestedProcedure);
-  const normalizedDiagnosis = normalizeText(extractedData.diagnosis);
   const policyProcedure = normalizeText(policy.procedure);
-  const allowedDiagnoses = policy.allowedDiagnoses.map(normalizeText);
 
   if (phraseMatches(policy.procedure, extractedData.requestedProcedure)) {
     score += 0.55;
@@ -172,17 +177,12 @@ function scoreLocalPolicy(policy, extractedData) {
     score += 0.25;
   }
 
-  if (policy.allowedDiagnoses.some((diagnosis) => {
-    return phraseMatches(diagnosis, extractedData.diagnosis);
-  })) {
+  if (policy.allowedDiagnoses.some((diagnosis) => phraseMatches(diagnosis, extractedData.diagnosis))) {
     score += 0.25;
   }
 
   const queryText = buildQueryText(extractedData);
-  const keywordMatches = (policy.keywords || []).filter((keyword) => {
-    return phraseMatches(keyword, queryText);
-  }).length;
-
+  const keywordMatches = (policy.keywords || []).filter((keyword) => phraseMatches(keyword, queryText)).length;
   score += Math.min(keywordMatches * 0.05, 0.25);
 
   if (extractedData.symptomDuration >= policy.minDurationMonths) {
@@ -199,17 +199,13 @@ function scoreLocalPolicy(policy, extractedData) {
 function retrieveLocalPolicy(extractedData, fallbackReason) {
   const sanitizedReason = sanitizeFallbackReason(fallbackReason);
   const candidates = policyCatalog
-    .map((policy) =>
-      createPolicyCandidate(
-        policy,
-        scoreLocalPolicy(policy, extractedData),
-        "local-catalog",
-        sanitizedReason
-      )
-    )
-    .sort((left, right) => {
-      return rankCandidate(right, extractedData) - rankCandidate(left, extractedData);
-    });
+    .map((policy) => createPolicyCandidate(
+      policy,
+      scoreLocalPolicy(policy, extractedData),
+      "local-catalog",
+      sanitizedReason,
+    ))
+    .sort((left, right) => rankCandidate(right, extractedData) - rankCandidate(left, extractedData));
 
   if (candidates.length === 0) {
     const error = new Error("No local policy clauses are available.");
@@ -226,6 +222,7 @@ function retrieveLocalPolicy(extractedData, fallbackReason) {
       procedure: candidate.procedure,
       clause: candidate.clause,
       score: candidate.score,
+      chunkText: candidate.chunkText,
     })),
   };
 }
@@ -237,6 +234,13 @@ async function ensurePolicyIndex() {
   const exists = indexes.some((index) => index.name === env.pineconeIndexName);
 
   if (!exists) {
+    log("INFO", "pinecone.index.create.start", {
+      indexName: env.pineconeIndexName,
+      dimension: EMBEDDING_DIMENSION,
+      cloud: env.pineconeCloud,
+      region: env.pineconeRegion,
+    });
+
     await client.createIndex({
       name: env.pineconeIndexName,
       dimension: EMBEDDING_DIMENSION,
@@ -252,22 +256,83 @@ async function ensurePolicyIndex() {
     });
   }
 
-  return client.index(env.pineconeIndexName).namespace(env.pineconeNamespace);
+  retrievalState.indexExists = true;
+
+  const index = client.index(env.pineconeIndexName);
+  return {
+    index,
+    namespaceIndex: index.namespace(env.pineconeNamespace),
+  };
+}
+
+async function getNamespaceVectorCount(index) {
+  const stats = await index.describeIndexStats();
+  const vectorCount = Number(stats.namespaces?.[env.pineconeNamespace]?.recordCount || 0);
+  retrievalState.vectorCount = vectorCount;
+  return vectorCount;
+}
+
+async function upsertVectors(namespaceIndex, records) {
+  await namespaceIndex.upsert(records);
+}
+
+function toTopMatches(candidates) {
+  return candidates.map((candidate) => ({
+    id: candidate.id,
+    procedure: candidate.procedure,
+    clause: candidate.clause,
+    score: candidate.score,
+    chunkText: candidate.chunkText,
+  }));
+}
+
+function getRetrievalStatus() {
+  return {
+    ready: retrievalState.ready,
+    mode: retrievalState.mode,
+    indexExists: retrievalState.indexExists,
+    vectorCount: retrievalState.vectorCount,
+    lastSyncAt: retrievalState.lastSyncAt,
+    lastError: retrievalState.lastError,
+    degraded: retrievalState.mode !== "pinecone",
+    fallbackActivated: retrievalState.fallbackActivated,
+    namespace: env.pineconeNamespace,
+    indexName: env.pineconeIndexName,
+  };
 }
 
 async function syncPolicyCatalog(options = {}) {
   const { force = false } = options;
+  const syncStarted = performance.now();
+
   try {
-    const index = await ensurePolicyIndex();
-    const stats = await index.describeIndexStats();
-    const existingCount =
-      stats.namespaces?.[env.pineconeNamespace]?.recordCount || 0;
+    log("INFO", "retrieval.sync.start", {
+      force,
+      policyCount: policyCatalog.length,
+      namespace: env.pineconeNamespace,
+    });
+
+    const { index, namespaceIndex } = await ensurePolicyIndex();
+    const existingCount = await getNamespaceVectorCount(index);
 
     if (!force && existingCount >= policyCatalog.length) {
+      retrievalState.ready = true;
+      retrievalState.mode = "pinecone";
+      retrievalState.lastSyncAt = new Date().toISOString();
+      retrievalState.lastError = null;
+      retrievalState.fallbackActivated = false;
+
+      log("INFO", "retrieval.sync.skip", {
+        reason: "sufficient_vectors",
+        existingCount,
+        latencyMs: Math.round(performance.now() - syncStarted),
+      });
+
       return {
         indexed: false,
         count: existingCount,
         mode: "pinecone",
+        ready: true,
       };
     }
 
@@ -276,7 +341,6 @@ async function syncPolicyCatalog(options = {}) {
 
     const records = vectors.map((values, indexPosition) => {
       const policy = policyCatalog[indexPosition];
-
       return {
         id: policy.id,
         values,
@@ -293,58 +357,117 @@ async function syncPolicyCatalog(options = {}) {
           ageMin: policy.ageMin,
           ageMax: policy.ageMax,
           policyClause: policy.policyClause,
+          chunkText: chunks[indexPosition],
         },
       };
     });
 
-    await index.upsert({
-      records,
+    await upsertVectors(namespaceIndex, records);
+    const vectorCount = await getNamespaceVectorCount(index);
+
+    retrievalState.ready = vectorCount > 0;
+    retrievalState.mode = retrievalState.ready ? "pinecone" : "unavailable";
+    retrievalState.lastSyncAt = new Date().toISOString();
+    retrievalState.lastError = retrievalState.ready
+      ? null
+      : "No vectors available in Pinecone namespace after upsert.";
+    retrievalState.fallbackActivated = false;
+
+    log("INFO", "retrieval.sync.complete", {
+      indexedCount: records.length,
+      namespaceVectorCount: vectorCount,
+      ready: retrievalState.ready,
+      latencyMs: Math.round(performance.now() - syncStarted),
     });
+
+    if (!retrievalState.ready) {
+      throw createRetrievalError(
+        "Pinecone retrieval is not ready because no vectors are available.",
+        "EMPTY_NAMESPACE",
+      );
+    }
 
     return {
       indexed: true,
       count: records.length,
       mode: "pinecone",
+      ready: true,
     };
   } catch (error) {
+    retrievalState.ready = false;
+    retrievalState.mode = env.allowDegradedAiFallback ? "local-catalog" : "unavailable";
+    retrievalState.lastError = sanitizeFallbackReason(error.message);
+    retrievalState.lastSyncAt = new Date().toISOString();
+
+    log("ERROR", "retrieval.sync.failed", {
+      namespace: env.pineconeNamespace,
+      fallbackEnabled: env.allowDegradedAiFallback,
+      latencyMs: Math.round(performance.now() - syncStarted),
+    }, error);
+
     return {
       indexed: false,
       count: policyCatalog.length,
-      mode: "local-catalog",
+      mode: env.allowDegradedAiFallback ? "local-catalog" : "unavailable",
       error: sanitizeFallbackReason(error.message),
       errorCode: error.code || null,
+      ready: false,
     };
   }
 }
 
 async function retrieveRelevantPolicy(extractedData) {
+  const retrievalStarted = performance.now();
+
   try {
-    const index = await ensurePolicyIndex();
-    const queryVector = await embedQuery(buildQueryText(extractedData));
-    const response = await index.query({
+    const { namespaceIndex } = await ensurePolicyIndex();
+    const queryText = buildQueryText(extractedData);
+
+    log("INFO", "retrieval.query.embed.start", {
+      queryPreview: queryText.slice(0, 120),
+    });
+
+    const queryVector = await embedQuery(queryText);
+    const response = await namespaceIndex.query({
       vector: queryVector,
       topK: 3,
       includeMetadata: true,
     });
 
-    if (!response.matches || response.matches.length === 0) {
-      const error = new Error("No matching policy clause was found in Pinecone.");
-      error.statusCode = 404;
-      throw error;
+    const matches = response.matches || [];
+
+    log("INFO", "retrieval.query.complete", {
+      retrievedDocumentCount: matches.length,
+      latencyMs: Math.round(performance.now() - retrievalStarted),
+    });
+
+    if (matches.length === 0) {
+      const notFound = createRetrievalError(
+        "No matching policy clause was found in Pinecone.",
+        "NO_MATCHES",
+      );
+      notFound.statusCode = 404;
+      throw notFound;
     }
 
-    const candidates = response.matches
+    const candidates = matches
       .map(mapPolicyMetadata)
       .filter(Boolean)
-      .sort((left, right) => {
-        return rankCandidate(right, extractedData) - rankCandidate(left, extractedData);
-      });
+      .sort((left, right) => rankCandidate(right, extractedData) - rankCandidate(left, extractedData));
 
     if (candidates.length === 0) {
-      const error = new Error("Policy matches were returned without usable metadata.");
-      error.statusCode = 404;
-      throw error;
+      const metadataError = createRetrievalError(
+        "Policy matches were returned without usable metadata.",
+        "INVALID_METADATA",
+      );
+      metadataError.statusCode = 502;
+      throw metadataError;
     }
+
+    retrievalState.ready = true;
+    retrievalState.mode = "pinecone";
+    retrievalState.lastError = null;
+    retrievalState.fallbackActivated = false;
 
     const bestMatch = candidates[0];
 
@@ -352,23 +475,38 @@ async function retrieveRelevantPolicy(extractedData) {
       ...bestMatch,
       retrievalMode: "pinecone",
       fallbackReason: null,
-      topMatches: candidates.map((candidate) => ({
-        id: candidate.id,
-        procedure: candidate.procedure,
-        clause: candidate.clause,
-        score: candidate.score,
-      })),
+      topMatches: toTopMatches(candidates),
     };
   } catch (error) {
+    log("ERROR", "retrieval.query.failed", {
+      fallbackEnabled: env.allowDegradedAiFallback,
+      latencyMs: Math.round(performance.now() - retrievalStarted),
+    }, error);
+
     if (!env.allowDegradedAiFallback) {
-      throw error;
+      throw createRetrievalError(
+        "Pinecone retrieval failed and degraded fallback is disabled.",
+        error.code || "RETRIEVAL_FAILED",
+        {
+          reason: sanitizeFallbackReason(error.message),
+        },
+      );
     }
+
+    retrievalState.fallbackActivated = true;
+    retrievalState.mode = "local-catalog";
+    retrievalState.lastError = sanitizeFallbackReason(error.message);
+
+    log("WARN", "retrieval.fallback.activated", {
+      reason: sanitizeFallbackReason(error.message),
+    });
 
     return retrieveLocalPolicy(extractedData, error.message);
   }
 }
 
 module.exports = {
+  getRetrievalStatus,
   retrieveRelevantPolicy,
   syncPolicyCatalog,
 };

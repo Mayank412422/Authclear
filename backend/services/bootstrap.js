@@ -1,48 +1,68 @@
 const { initializeDatabase } = require("../db");
-const { syncPolicyCatalog } = require("./retriever");
 const { env } = require("../config/env");
+const { probeEmbeddingService } = require("./embeddingService");
+const { probeGenerationService } = require("./ragGenerator");
+const { getRetrievalStatus, syncPolicyCatalog } = require("./retriever");
+const { log } = require("../utils/logger");
 
 const startupState = {
   status: "pending",
   lastReadyAt: null,
   lastError: null,
-  warnings: [],
+  degraded: false,
   dependencies: {
-    database: "pending",
-    retrieval: "pending",
+    database: { ready: false, error: null },
+    pinecone: { ready: false, error: null },
+    embeddings: { ready: false, error: null },
+    llm: { ready: false, error: null },
+    retrieval: {
+      ready: false,
+      error: null,
+      mode: "uninitialized",
+      indexExists: false,
+      vectorCount: 0,
+      namespace: env.pineconeNamespace,
+      indexName: env.pineconeIndexName,
+    },
   },
   warmupPromise: null,
 };
 
-function formatDependencyError(error, dependency) {
-  return {
-    dependency,
-    message: error.message,
-    code: error.code || null,
-    hint:
-      error.code === "ENOTFOUND"
-        ? "Verify the PostgreSQL or Pinecone host in your environment configuration."
-        : "Verify DATABASE_URL, GEMINI_API_KEY, PINECONE_API_KEY, and network access.",
+function updateRetrievalDependency() {
+  const retrieval = getRetrievalStatus();
+  startupState.dependencies.retrieval = {
+    ready: retrieval.ready,
+    error: retrieval.lastError,
+    mode: retrieval.mode,
+    indexExists: retrieval.indexExists,
+    vectorCount: retrieval.vectorCount,
+    namespace: retrieval.namespace,
+    indexName: retrieval.indexName,
   };
-}
-
-function createSyncFailure(result) {
-  const error = new Error(
-    result.error || "Policy indexing could not initialize Pinecone retrieval."
-  );
-  error.code = result.errorCode || null;
-  return error;
+  startupState.dependencies.pinecone = {
+    ready: retrieval.indexExists,
+    error: retrieval.lastError,
+  };
 }
 
 function getStartupStatus() {
   return {
     status: startupState.status,
     ready: startupState.status === "ready",
-    degraded: startupState.status === "degraded",
+    degraded: startupState.degraded,
     lastReadyAt: startupState.lastReadyAt,
     lastError: startupState.lastError,
-    warnings: startupState.warnings,
     dependencies: startupState.dependencies,
+  };
+}
+
+function markFailure(error, dependency) {
+  startupState.status = env.allowDegradedAiFallback ? "degraded" : "failed";
+  startupState.degraded = true;
+  startupState.lastError = {
+    dependency,
+    message: error.message,
+    code: error.code || null,
   };
 }
 
@@ -52,53 +72,59 @@ async function warmupDependencies() {
   }
 
   startupState.status = "initializing";
+  startupState.degraded = false;
   startupState.lastError = null;
-  startupState.warnings = [];
-  startupState.dependencies = {
-    database: "pending",
-    retrieval: "pending",
-  };
 
   startupState.warmupPromise = (async () => {
     try {
       await initializeDatabase();
-      startupState.dependencies.database = "ready";
+      startupState.dependencies.database = { ready: true, error: null };
+
       const syncResult = await syncPolicyCatalog();
+      updateRetrievalDependency();
 
       if (syncResult.mode !== "pinecone") {
-        const optionalError = createSyncFailure(syncResult);
+        throw new Error(syncResult.error || "Pinecone retrieval is not ready.");
+      }
 
-        startupState.dependencies.retrieval = env.allowDegradedAiFallback
-          ? "degraded"
-          : "failed";
+      const embeddingStatus = await probeEmbeddingService();
+      startupState.dependencies.embeddings = embeddingStatus;
 
-        if (!env.allowDegradedAiFallback) {
-          throw optionalError;
-        }
+      if (!embeddingStatus.ready) {
+        throw new Error(embeddingStatus.error || "Embedding service is unavailable.");
+      }
 
-        startupState.status = "degraded";
-        startupState.lastReadyAt = new Date().toISOString();
-        startupState.warnings = [
-          formatDependencyError(optionalError, "retrieval"),
-        ];
-        return getStartupStatus();
+      const generationStatus = await probeGenerationService();
+      startupState.dependencies.llm = generationStatus;
+
+      if (!generationStatus.ready) {
+        throw new Error(generationStatus.error || "LLM service is unavailable.");
       }
 
       startupState.status = "ready";
+      startupState.degraded = false;
       startupState.lastReadyAt = new Date().toISOString();
-      startupState.dependencies.retrieval = "ready";
+
+      log("INFO", "startup.ready", {
+        retrievalMode: startupState.dependencies.retrieval.mode,
+        vectorCount: startupState.dependencies.retrieval.vectorCount,
+      });
+
       return getStartupStatus();
     } catch (error) {
-      if (startupState.dependencies.database !== "ready") {
-        startupState.dependencies.database = "failed";
-        startupState.dependencies.retrieval = "pending";
-        startupState.lastError = formatDependencyError(error, "database");
-      } else {
-        startupState.lastError = formatDependencyError(error, "retrieval");
+      updateRetrievalDependency();
+      markFailure(error, "startup");
+
+      if (!env.allowDegradedAiFallback) {
+        log("ERROR", "startup.failed", {}, error);
+        throw error;
       }
 
-      startupState.status = "degraded";
-      throw error;
+      log("WARN", "startup.degraded", {
+        error: error.message,
+      });
+
+      return getStartupStatus();
     } finally {
       startupState.warmupPromise = null;
     }
@@ -108,18 +134,17 @@ async function warmupDependencies() {
 }
 
 async function ensureDependenciesReady() {
-  try {
-    await warmupDependencies();
-  } catch (_error) {
-    const state = getStartupStatus();
-    const wrapped = new Error(
-      "Backend dependencies are unavailable. Check PostgreSQL connectivity and AI provider configuration."
-    );
+  await warmupDependencies();
+  const state = getStartupStatus();
+
+  if (!state.ready && !env.allowDegradedAiFallback) {
+    const wrapped = new Error("Backend dependencies are unavailable.");
     wrapped.statusCode = 503;
     wrapped.details = state.lastError;
     throw wrapped;
   }
-};
+}
+
 module.exports = {
   ensureDependenciesReady,
   getStartupStatus,

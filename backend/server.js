@@ -4,6 +4,7 @@ const cors = require("cors");
 const { env } = require("./config/env");
 const claimRoutes = require("./routes/claim");
 const { getStartupStatus, warmupDependencies } = require("./services/bootstrap");
+const { log } = require("./utils/logger");
 
 async function startServer() {
   const app = express();
@@ -22,7 +23,19 @@ async function startServer() {
       status: startup.ready ? "ok" : "degraded",
       service: "AuthClear API",
       timestamp: new Date().toISOString(),
-      dependencies: startup,
+      degradedMode: startup.degraded,
+      retrieval: {
+        ready: startup.dependencies.retrieval.ready,
+        mode: startup.dependencies.retrieval.mode,
+        indexExists: startup.dependencies.retrieval.indexExists,
+        vectorCount: startup.dependencies.retrieval.vectorCount,
+      },
+      dependencies: startup.dependencies,
+      startup: {
+        status: startup.status,
+        lastReadyAt: startup.lastReadyAt,
+        lastError: startup.lastError,
+      },
     });
   });
 
@@ -31,10 +44,11 @@ async function startServer() {
   app.use((error, _req, res, _next) => {
     const statusCode = error.statusCode || 500;
 
-    console.error(
-      `[AuthClear] ${statusCode} ${error.message}`,
-      error.details ? { details: error.details } : ""
-    );
+    log("ERROR", "request.failed", {
+      statusCode,
+      message: error.message,
+      details: error.details || null,
+    }, error);
 
     if (error.name === "MulterError") {
       return res.status(400).json({
@@ -52,7 +66,9 @@ async function startServer() {
 
   await new Promise((resolve, reject) => {
     const server = app.listen(env.port, () => {
-      console.log(`[AuthClear] Backend listening on port ${env.port}`);
+      log("INFO", "server.started", {
+        port: env.port,
+      });
       resolve(server);
     });
 
@@ -61,6 +77,6 @@ async function startServer() {
 }
 
 startServer().catch((error) => {
-  console.error("[AuthClear] Failed to start backend", error.message);
+  log("ERROR", "server.start.failed", {}, error);
   process.exit(1);
 });
