@@ -44,7 +44,7 @@ const baseResult = {
     processingMode: "degraded",
     warnings: [],
     extraction: {
-      mode: "fallback-local",
+      mode: "fallback-unavailable",
       degraded: true,
       provider: "gemini",
       reasonCode: "quota_exceeded",
@@ -59,6 +59,6 @@ const baseResult = {
 test("ResultPanel relabels fallback extraction output and shows the local retrieval badge", () => {
   render(<ResultPanel result={baseResult} />);
 
-  expect(screen.getByText("Fallback output")).toBeInTheDocument();
+  expect(screen.getByText("Unavailable")).toBeInTheDocument();
   expect(screen.getByText("Local Retrieval")).toBeInTheDocument();
 });

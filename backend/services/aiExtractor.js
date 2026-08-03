@@ -3,6 +3,7 @@ const { ChatGoogleGenerativeAI } = require("@langchain/google-genai");
 
 const { env } = require("../config/env");
 const { claimExtractionSchema } = require("../utils/validator");
+const { log } = require("../utils/logger");
 
 const EXTRACTION_PROMPT = `
 You are processing a handwritten medical prescription for insurance pre-authorization.
@@ -234,7 +235,10 @@ async function extractClaimData({ buffer, mimeType }) {
       }),
     ]);
 
-    console.log("[Gemini Raw Response]", result);
+    log("INFO", "extraction.complete", {
+      mode: "gemini",
+      model: resolveGeminiTextModel(env.geminiTextModel),
+    });
 
     return {
       data: claimExtractionSchema.parse(normalizeStructuredExtraction(result)),
@@ -254,7 +258,7 @@ async function extractClaimData({ buffer, mimeType }) {
         reason: error.message,
       });
 
-      console.warn("[AuthClear] Gemini extraction unavailable.", {
+      log("WARN", "extraction.fallback.activated", {
         provider: EXTRACTION_PROVIDER,
         model: resolveGeminiTextModel(env.geminiTextModel),
         mode: meta.mode,

@@ -65,9 +65,11 @@ test("Dashboard shows the degraded warning banner for fallback extraction", asyn
       manualReview: true,
       degraded: true,
       processingMode: "degraded",
-      warnings: [],
+      warnings: [
+        "Gemini extraction was unavailable for this request. AuthClear returned unknown fields and marked the result for manual review.",
+      ],
       extraction: {
-        mode: "fallback-local",
+        mode: "fallback-unavailable",
         degraded: true,
         provider: "gemini",
         reasonCode: "quota_exceeded",

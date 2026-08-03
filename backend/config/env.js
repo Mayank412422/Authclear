@@ -131,7 +131,7 @@ const envSchema = z.object({
   PINECONE_REGION: z.string().default("us-east-1"),
   ALLOW_DEGRADED_AI_FALLBACK: z
     .preprocess(parseBooleanEnv, z.boolean())
-    .default(true),
+    .default(false),
 }).superRefine((data, context) => {
   if (data.ALLOW_DEGRADED_AI_FALLBACK) {
     return;

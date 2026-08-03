@@ -21,11 +21,11 @@ CLIENT_ORIGIN=http://localhost:5173,https://authclear.vercel.app
 4. Choose an AI fallback mode:
 
 ```bash
-ALLOW_DEGRADED_AI_FALLBACK=true
+ALLOW_DEGRADED_AI_FALLBACK=false
 ```
 
-- `true`: demo/dev mode. Gemini and Pinecone are optional, and the API returns degraded-but-usable responses when those providers are unavailable.
-- `false`: strict mode. `GEMINI_API_KEY` and `PINECONE_API_KEY` are required, and provider failures surface as startup or request errors.
+- `false`: strict production mode (default). `GEMINI_API_KEY` and `PINECONE_API_KEY` are required, and provider failures surface as startup or request errors.
+- `true`: optional degraded mode for demos. Retrieval or generation can fall back with explicit warnings and health degradation.
 
 5. If strict mode is enabled, also add `GEMINI_API_KEY` and `PINECONE_API_KEY`.
 6. Run:
@@ -41,7 +41,8 @@ The backend will:
 - create PostgreSQL tables automatically from `backend/db/schema.sql`
 - create or reuse the Pinecone index `insurance-policies`
 - seed the bundled policy corpus into Pinecone on startup
-- expose degraded execution details in `/api/process-claim` metadata when external AI dependencies are unavailable
+- run a true RAG path (`query -> embedding -> Pinecone top-k -> context assembly -> Gemini answer`)
+- expose dependency readiness in `/api/health` and degraded execution details in `/api/process-claim` metadata
 
 Optional manual re-index:
 

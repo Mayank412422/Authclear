@@ -1,6 +1,7 @@
 const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai");
 
 const { env } = require("../config/env");
+const { log } = require("../utils/logger");
 
 const EMBEDDING_DIMENSION = 768;
 
@@ -27,15 +28,47 @@ function getEmbeddingsClient() {
 }
 
 async function embedQuery(text) {
+  log("INFO", "embedding.query.start", {
+    model: env.geminiEmbeddingModel,
+    textLength: String(text || "").length,
+  });
   return getEmbeddingsClient().embedQuery(text);
 }
 
 async function embedPolicyChunks(chunks) {
+  log("INFO", "embedding.documents.start", {
+    model: env.geminiEmbeddingModel,
+    chunkCount: chunks.length,
+  });
   return getEmbeddingsClient().embedDocuments(chunks);
+}
+
+async function probeEmbeddingService() {
+  try {
+    await embedQuery("AuthClear embedding health probe");
+    return {
+      ready: true,
+      provider: "gemini",
+      model: env.geminiEmbeddingModel,
+      error: null,
+    };
+  } catch (error) {
+    log("ERROR", "embedding.health.failed", {
+      model: env.geminiEmbeddingModel,
+    }, error);
+
+    return {
+      ready: false,
+      provider: "gemini",
+      model: env.geminiEmbeddingModel,
+      error: error.message,
+    };
+  }
 }
 
 module.exports = {
   EMBEDDING_DIMENSION,
   embedPolicyChunks,
   embedQuery,
+  probeEmbeddingService,
 };
