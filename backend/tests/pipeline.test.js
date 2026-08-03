@@ -8,6 +8,7 @@ const pipelineModulePath = path.join(backendRoot, "services", "pipeline.js");
 const extractorModulePath = path.join(backendRoot, "services", "aiExtractor.js");
 const retrieverModulePath = path.join(backendRoot, "services", "retriever.js");
 const decisionModulePath = path.join(backendRoot, "services", "decisionEngine.js");
+const generatorModulePath = path.join(backendRoot, "services", "ragGenerator.js");
 const dbModulePath = path.join(backendRoot, "db", "index.js");
 
 const ORIGINAL_ENV = { ...process.env };
@@ -31,7 +32,7 @@ function mockModule(modulePath, exports) {
   };
 }
 
-function loadPipelineWithMocks({ envOverrides = {}, extractor, retriever, decision, db }) {
+function loadPipelineWithMocks({ envOverrides = {}, extractor, retriever, decision, generator, db }) {
   restoreEnvironment();
   Object.assign(process.env, {
     DATABASE_URL: "postgresql://postgres:password@localhost:5432/postgres",
@@ -45,6 +46,7 @@ function loadPipelineWithMocks({ envOverrides = {}, extractor, retriever, decisi
   mockModule(extractorModulePath, { extractClaimData: extractor });
   mockModule(retrieverModulePath, { retrieveRelevantPolicy: retriever });
   mockModule(decisionModulePath, { evaluateClaim: decision });
+  mockModule(generatorModulePath, { generateRagAnswer: generator });
   mockModule(dbModulePath, { persistProcessedClaim: db });
 
   return require(pipelineModulePath);
@@ -57,6 +59,7 @@ test.afterEach(() => {
   delete require.cache[extractorModulePath];
   delete require.cache[retrieverModulePath];
   delete require.cache[decisionModulePath];
+  delete require.cache[generatorModulePath];
   delete require.cache[dbModulePath];
 });
 
@@ -109,6 +112,7 @@ test("processClaim forces manual review and degraded metadata for fallback extra
       reason: "Approved.",
       policy_clause: "Covered when symptoms persist for 2 months.",
     }),
+    generator: async () => "Generated answer from retrieved context.",
     db: async () => createPersistResult(),
   });
 
@@ -122,6 +126,7 @@ test("processClaim forces manual review and degraded metadata for fallback extra
   assert.equal(result.metadata.degraded, true);
   assert.equal(result.metadata.processingMode, "degraded");
   assert.match(result.metadata.warnings[0], /Gemini extraction was unavailable/i);
+  assert.equal(result.decision.reason, "Generated answer from retrieved context.");
 });
 
 test("processClaim marks degraded mode when retrieval falls back to the local catalog", async () => {
@@ -163,6 +168,7 @@ test("processClaim marks degraded mode when retrieval falls back to the local ca
       reason: "Approved.",
       policy_clause: "Covered when symptoms persist for 2 months.",
     }),
+    generator: async () => "Generated answer from retrieved context.",
     db: async () => createPersistResult(),
   });
 
@@ -175,6 +181,7 @@ test("processClaim marks degraded mode when retrieval falls back to the local ca
   assert.equal(result.metadata.degraded, true);
   assert.equal(result.policy.retrievalMode, "local-catalog");
   assert.match(result.metadata.warnings[0], /Pinecone retrieval was unavailable/i);
+  assert.equal(result.decision.reason, "Generated answer from retrieved context.");
 });
 
 test("processClaim returns full-ai metadata when extraction and retrieval both succeed", async () => {
@@ -216,6 +223,7 @@ test("processClaim returns full-ai metadata when extraction and retrieval both s
       reason: "Approved.",
       policy_clause: "Covered when symptoms persist for 2 months.",
     }),
+    generator: async () => "Generated answer from retrieved context.",
     db: async () => createPersistResult(),
   });
 
@@ -228,4 +236,5 @@ test("processClaim returns full-ai metadata when extraction and retrieval both s
   assert.equal(result.metadata.degraded, false);
   assert.equal(result.metadata.processingMode, "full-ai");
   assert.deepEqual(result.metadata.warnings, []);
+  assert.equal(result.decision.reason, "Generated answer from retrieved context.");
 });

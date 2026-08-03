@@ -105,10 +105,10 @@ test("extractClaimData falls back on quota errors when degraded mode is enabled"
     mimeType: "image/png",
   });
 
-  assert.equal(result.meta.mode, "fallback-local");
+  assert.equal(result.meta.mode, "fallback-unavailable");
   assert.equal(result.meta.degraded, true);
   assert.equal(result.meta.reasonCode, "quota_exceeded");
-  assert.equal(result.data.confidence, 0.38);
+  assert.equal(result.data.confidence, 0.1);
 });
 
 test("extractClaimData throws on quota errors when degraded mode is disabled", async () => {

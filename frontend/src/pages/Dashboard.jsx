@@ -117,9 +117,8 @@ function Dashboard() {
 
           {result?.metadata?.degraded ? (
             <div className="mt-4 rounded-3xl border border-wheat/35 bg-wheat/10 px-5 py-4 text-sm leading-6 text-sand">
-              {result.metadata.extraction?.degraded
-                ? "Gemini extraction was unavailable for this request. AuthClear returned unknown fields and marked the result for manual review."
-                : "AuthClear completed this request in degraded mode because external retrieval services were unavailable."}
+              {result.metadata.warnings?.[0]
+                || "AuthClear completed this request in degraded mode because an AI dependency is unavailable."}
             </div>
           ) : null}
 
