@@ -1,4 +1,4 @@
-const express = require("express");
+ express = require("express");
 const cors = require("cors");
 
 const { env } = require("./config/env");
@@ -18,18 +18,34 @@ async function startServer() {
 
   app.get("/api/health", (_req, res) => {
     const startup = getStartupStatus();
+    const retrieval = startup.dependencies.retrieval;
+    const pinecone = startup.dependencies.pinecone;
+
+    const retrievalReady = retrieval.ready && retrieval.mode === "pinecone";
+    const pineconeConnected = Boolean(pinecone.ready);
 
     res.json({
       status: startup.ready ? "ok" : "degraded",
       service: "AuthClear API",
       timestamp: new Date().toISOString(),
-      degradedMode: startup.degraded,
-      retrieval: {
-        ready: startup.dependencies.retrieval.ready,
-        mode: startup.dependencies.retrieval.mode,
-        indexExists: startup.dependencies.retrieval.indexExists,
-        vectorCount: startup.dependencies.retrieval.vectorCount,
+
+      // Strict, top-level fields required by the health contract.
+      retrieval: retrievalReady ? "ready" : "not_ready",
+      pinecone: pineconeConnected ? "connected" : "disconnected",
+      policy: {
+        retrievalMode: retrieval.mode,
+        indexName: retrieval.indexName,
+        namespace: retrieval.namespace,
+        vectorCount: retrieval.vectorCount,
+        indexExists: retrieval.indexExists,
       },
+      metadata: {
+        degraded: startup.degraded,
+        processingMode: startup.degraded ? "degraded" : "full-ai",
+      },
+
+      // Full diagnostic detail, preserved for debugging/observability.
+      degradedMode: startup.degraded,
       dependencies: startup.dependencies,
       startup: {
         status: startup.status,
@@ -70,7 +86,7 @@ async function startServer() {
         port: env.port,
       });
       resolve(server);
-    });
+    });const
 
     server.on("error", reject);
   });

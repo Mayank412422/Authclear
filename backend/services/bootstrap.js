@@ -33,6 +33,7 @@ function updateRetrievalDependency() {
   startupState.dependencies.retrieval = {
     ready: retrieval.ready,
     error: retrieval.lastError,
+    errorCode: retrieval.lastErrorCode,
     mode: retrieval.mode,
     indexExists: retrieval.indexExists,
     vectorCount: retrieval.vectorCount,
@@ -40,7 +41,8 @@ function updateRetrievalDependency() {
     indexName: retrieval.indexName,
   };
   startupState.dependencies.pinecone = {
-    ready: retrieval.indexExists,
+    ready: retrieval.mode === "pinecone",
+    connected: retrieval.indexExists,
     error: retrieval.lastError,
   };
 }
@@ -56,8 +58,15 @@ function getStartupStatus() {
   };
 }
 
+/**
+ * dependency = "pinecone" is special-cased: retrieval failures are ALWAYS
+ * fatal ("failed"), regardless of ALLOW_DEGRADED_AI_FALLBACK. That flag
+ * only ever softens Gemini extraction/generation failures, never the
+ * Pinecone/RAG retrieval path.
+ */
 function markFailure(error, dependency) {
-  startupState.status = env.allowDegradedAiFallback ? "degraded" : "failed";
+  const isPineconeFailure = dependency === "pinecone";
+  startupState.status = !isPineconeFailure && env.allowDegradedAiFallback ? "degraded" : "failed";
   startupState.degraded = true;
   startupState.lastError = {
     dependency,
@@ -80,13 +89,40 @@ async function warmupDependencies() {
       await initializeDatabase();
       startupState.dependencies.database = { ready: true, error: null };
 
-      const syncResult = await syncPolicyCatalog();
-      updateRetrievalDependency();
-
-      if (syncResult.mode !== "pinecone") {
-        throw new Error(syncResult.error || "Pinecone retrieval is not ready.");
+      // --- Pinecone / RAG retrieval: NO silent fallback, ever. -----------
+      // This block intentionally ignores ALLOW_DEGRADED_AI_FALLBACK. If
+      // Pinecone cannot be reached, the index is missing/misconfigured, or
+      // the sync doesn't end in "pinecone" mode, startup fails hard.
+      let syncResult;
+      try {
+        syncResult = await syncPolicyCatalog();
+      } catch (retrievalError) {
+        updateRetrievalDependency();
+        markFailure(retrievalError, "pinecone");
+        console.error(`[PINECONE] FATAL — startup cannot continue: ${retrievalError.message}`);
+        log("ERROR", "startup.pinecone.failed", { code: retrievalError.code || null }, retrievalError);
+        throw retrievalError;
       }
 
+      updateRetrievalDependency();
+
+      if (syncResult.mode !== "pinecone" || !syncResult.ready) {
+        const hardError = new Error(
+          syncResult.error || `Pinecone retrieval is not ready (mode="${syncResult.mode}").`
+        );
+        hardError.code = syncResult.errorCode || "RETRIEVAL_NOT_READY";
+        markFailure(hardError, "pinecone");
+        console.error(`[PINECONE] FATAL — retrieval mode is "${syncResult.mode}", expected "pinecone".`);
+        log("ERROR", "startup.pinecone.not_ready", { mode: syncResult.mode }, hardError);
+        throw hardError;
+      }
+
+      console.log(
+        `[PINECONE] Startup sync OK — index="${env.pineconeIndexName}" ` +
+        `namespace="${env.pineconeNamespace}" vectors=${startupState.dependencies.retrieval.vectorCount}`
+      );
+
+      // --- Embeddings & LLM: still governed by ALLOW_DEGRADED_AI_FALLBACK
       const embeddingStatus = await probeEmbeddingService();
       startupState.dependencies.embeddings = embeddingStatus;
 
@@ -113,10 +149,14 @@ async function warmupDependencies() {
       return getStartupStatus();
     } catch (error) {
       updateRetrievalDependency();
-      markFailure(error, "startup");
 
-      if (!env.allowDegradedAiFallback) {
-        log("ERROR", "startup.failed", {}, error);
+      const isPineconeFailure = startupState.dependencies.retrieval.mode !== "pinecone";
+      markFailure(error, error.code === "MISSING_API_KEY" && isPineconeFailure ? "pinecone" : (isPineconeFailure ? "pinecone" : "startup"));
+
+      // Pinecone/retrieval failures are ALWAYS fatal. ALLOW_DEGRADED_AI_FALLBACK
+      // is only ever applied to Gemini extraction/generation, never to retrieval.
+      if (!env.allowDegradedAiFallback || isPineconeFailure) {
+        log("ERROR", "startup.failed", { fatal: true }, error);
         throw error;
       }
 

@@ -2,10 +2,14 @@ const { performance } = require("node:perf_hooks");
 const { Pinecone } = require("@pinecone-database/pinecone");
 
 const { env } = require("../config/env");
-const policyCatalog = require("../data/policies.json");
 const { EMBEDDING_DIMENSION, embedPolicyChunks, embedQuery } = require("./embeddingService");
 const { normalizeText } = require("../utils/validator");
 const { log } = require("../utils/logger");
+
+// NOTE: the local policy catalog JSON is intentionally NOT used as a
+// fallback data source anymore. Retrieval always goes through Pinecone —
+// there is no in-process fallback path left to accidentally fall into.
+const policyCatalog = require("../data/policies.json");
 
 let pinecone;
 
@@ -16,7 +20,8 @@ const retrievalState = {
   vectorCount: 0,
   lastSyncAt: null,
   lastError: null,
-  fallbackActivated: false,
+  lastErrorCode: null,
+  fallbackActivated: false, // kept for API/shape compatibility; always stays false now
 };
 
 function sanitizeFallbackReason(reason) {
@@ -25,23 +30,40 @@ function sanitizeFallbackReason(reason) {
   return normalized.length <= 220 ? normalized : `${normalized.slice(0, 217)}...`;
 }
 
-function createRetrievalError(message, code = null, details = null) {
+/**
+ * Builds a rich, explicit error for any Pinecone/retrieval failure.
+ * Every caller of this MUST let the error propagate (throw), never catch
+ * it and silently substitute local data.
+ */
+function createRetrievalError(message, code = null, details = null, cause = null) {
   const error = new Error(message);
   error.statusCode = 503;
   error.code = code;
   error.details = details || undefined;
+  error.stage = "pinecone";
+  if (cause) {
+    error.cause = cause;
+    // Preserve the original stack trace chain for debugging.
+    error.stack = `${error.stack}\nCaused by: ${cause.stack || cause.message}`;
+  }
   return error;
 }
 
 function getPineconeClient() {
   if (!pinecone) {
     if (!env.pineconeApiKey) {
-      throw createRetrievalError("PINECONE_API_KEY is not configured.", "MISSING_API_KEY");
+      console.error("[PINECONE] Missing PINECONE_API_KEY — cannot initialize client.");
+      throw createRetrievalError(
+        "PINECONE_API_KEY is not configured. Set it in backend/.env.",
+        "MISSING_API_KEY",
+      );
     }
 
+    console.log("[PINECONE] Initializing Pinecone client...");
     pinecone = new Pinecone({
       apiKey: env.pineconeApiKey,
     });
+    console.log("[PINECONE] Client initialized.");
   }
 
   return pinecone;
@@ -145,137 +167,6 @@ function rankCandidate(candidate, extractedData) {
   return rankingScore;
 }
 
-function createPolicyCandidate(policy, score, retrievalMode, fallbackReason = null) {
-  return {
-    id: policy.id,
-    source: policy.source,
-    procedure: policy.procedure,
-    procedureNormalized: normalizeText(policy.procedure),
-    allowedDiagnoses: policy.allowedDiagnoses,
-    allowedDiagnosesNormalized: policy.allowedDiagnoses.map(normalizeText),
-    keywords: policy.keywords || [],
-    keywordsNormalized: (policy.keywords || []).map(normalizeText),
-    minDurationMonths: Number(policy.minDurationMonths),
-    ageMin: Number(policy.ageMin),
-    ageMax: Number(policy.ageMax),
-    clause: policy.policyClause,
-    score: normalizeScore(score),
-    retrievalMode,
-    fallbackReason,
-    chunkText: buildPolicyChunk(policy),
-  };
-}
-
-function scoreLocalPolicy(policy, extractedData) {
-  let score = 0.15;
-  const normalizedProcedure = normalizeText(extractedData.requestedProcedure);
-  const policyProcedure = normalizeText(policy.procedure);
-
-  if (phraseMatches(policy.procedure, extractedData.requestedProcedure)) {
-    score += 0.55;
-  } else if (policyProcedure.includes(normalizedProcedure) || normalizedProcedure.includes(policyProcedure)) {
-    score += 0.25;
-  }
-
-  if (policy.allowedDiagnoses.some((diagnosis) => phraseMatches(diagnosis, extractedData.diagnosis))) {
-    score += 0.25;
-  }
-
-  const queryText = buildQueryText(extractedData);
-  const keywordMatches = (policy.keywords || []).filter((keyword) => phraseMatches(keyword, queryText)).length;
-  score += Math.min(keywordMatches * 0.05, 0.25);
-
-  if (extractedData.symptomDuration >= policy.minDurationMonths) {
-    score += 0.03;
-  }
-
-  if (extractedData.age >= policy.ageMin && extractedData.age <= policy.ageMax) {
-    score += 0.02;
-  }
-
-  return normalizeScore(score);
-}
-
-function retrieveLocalPolicy(extractedData, fallbackReason) {
-  const sanitizedReason = sanitizeFallbackReason(fallbackReason);
-  const candidates = policyCatalog
-    .map((policy) => createPolicyCandidate(
-      policy,
-      scoreLocalPolicy(policy, extractedData),
-      "local-catalog",
-      sanitizedReason,
-    ))
-    .sort((left, right) => rankCandidate(right, extractedData) - rankCandidate(left, extractedData));
-
-  if (candidates.length === 0) {
-    const error = new Error("No local policy clauses are available.");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const bestMatch = candidates[0];
-
-  return {
-    ...bestMatch,
-    topMatches: candidates.slice(0, 3).map((candidate) => ({
-      id: candidate.id,
-      procedure: candidate.procedure,
-      clause: candidate.clause,
-      score: candidate.score,
-      chunkText: candidate.chunkText,
-    })),
-  };
-}
-
-async function ensurePolicyIndex() {
-  const client = getPineconeClient();
-  const indexList = await client.listIndexes();
-  const indexes = indexList.indexes || [];
-  const exists = indexes.some((index) => index.name === env.pineconeIndexName);
-
-  if (!exists) {
-    log("INFO", "pinecone.index.create.start", {
-      indexName: env.pineconeIndexName,
-      dimension: EMBEDDING_DIMENSION,
-      cloud: env.pineconeCloud,
-      region: env.pineconeRegion,
-    });
-
-    await client.createIndex({
-      name: env.pineconeIndexName,
-      dimension: EMBEDDING_DIMENSION,
-      metric: "cosine",
-      waitUntilReady: true,
-      suppressConflicts: true,
-      spec: {
-        serverless: {
-          cloud: env.pineconeCloud,
-          region: env.pineconeRegion,
-        },
-      },
-    });
-  }
-
-  retrievalState.indexExists = true;
-
-  const index = client.index(env.pineconeIndexName);
-  return {
-    index,
-    namespaceIndex: index.namespace(env.pineconeNamespace),
-  };
-}
-
-async function getNamespaceVectorCount(index) {
-  const stats = await index.describeIndexStats();
-  const vectorCount = Number(stats.namespaces?.[env.pineconeNamespace]?.recordCount || 0);
-  retrievalState.vectorCount = vectorCount;
-  return vectorCount;
-}
-
-async function upsertVectors(namespaceIndex, records) {
-  await namespaceIndex.upsert(records);
-}
-
 function toTopMatches(candidates) {
   return candidates.map((candidate) => ({
     id: candidate.id,
@@ -294,6 +185,7 @@ function getRetrievalStatus() {
     vectorCount: retrievalState.vectorCount,
     lastSyncAt: retrievalState.lastSyncAt,
     lastError: retrievalState.lastError,
+    lastErrorCode: retrievalState.lastErrorCode,
     degraded: retrievalState.mode !== "pinecone",
     fallbackActivated: retrievalState.fallbackActivated,
     namespace: env.pineconeNamespace,
@@ -301,121 +193,239 @@ function getRetrievalStatus() {
   };
 }
 
+/**
+ * Connects to Pinecone, verifies (or creates) the target index, and
+ * validates that its vector dimension actually matches the embedding
+ * model's output dimension. A stale index created with a different
+ * dimension is one of the most common silent-looking failure causes —
+ * upserts/queries against it fail, and previously that failure was
+ * swallowed by the local-catalog fallback. Now it throws explicitly.
+ */
+async function ensurePolicyIndex() {
+  const client = getPineconeClient();
+
+  console.log(`[PINECONE] Checking for index "${env.pineconeIndexName}" (cloud=${env.pineconeCloud}, region=${env.pineconeRegion})...`);
+
+  let indexList;
+  try {
+    indexList = await client.listIndexes();
+  } catch (error) {
+    console.error(`[PINECONE] listIndexes() failed: ${error.message}`);
+    throw createRetrievalError(
+      "Could not reach Pinecone to list indexes. This almost always means " +
+      "PINECONE_API_KEY is missing/invalid, or the key does not have access " +
+      "to this project.",
+      "PINECONE_UNREACHABLE",
+      { originalMessage: error.message },
+      error,
+    );
+  }
+
+  const indexes = indexList.indexes || [];
+  const existing = indexes.find((index) => index.name === env.pineconeIndexName);
+
+  if (!existing) {
+    console.log(`[PINECONE] Index "${env.pineconeIndexName}" not found. Creating it with dimension=${EMBEDDING_DIMENSION}...`);
+    log("INFO", "pinecone.index.create.start", {
+      indexName: env.pineconeIndexName,
+      dimension: EMBEDDING_DIMENSION,
+      cloud: env.pineconeCloud,
+      region: env.pineconeRegion,
+    });
+
+    try {
+      await client.createIndex({
+        name: env.pineconeIndexName,
+        dimension: EMBEDDING_DIMENSION,
+        metric: "cosine",
+        waitUntilReady: true,
+        suppressConflicts: true,
+        spec: {
+          serverless: {
+            cloud: env.pineconeCloud,
+            region: env.pineconeRegion,
+          },
+        },
+      });
+    } catch (error) {
+      console.error(`[PINECONE] createIndex() failed: ${error.message}`);
+      throw createRetrievalError(
+        `Failed to create Pinecone index "${env.pineconeIndexName}" in ` +
+        `${env.pineconeCloud}/${env.pineconeRegion}. Check that this ` +
+        "cloud/region combination is enabled for your Pinecone plan.",
+        "INDEX_CREATE_FAILED",
+        { originalMessage: error.message },
+        error,
+      );
+    }
+
+    console.log(`[PINECONE] Index "${env.pineconeIndexName}" created successfully.`);
+  } else {
+    const actualDimension = Number(existing.dimension);
+    console.log(`[PINECONE] Found existing index "${env.pineconeIndexName}" (dimension=${actualDimension}, metric=${existing.metric}, host=${existing.host || "n/a"}).`);
+
+    if (actualDimension !== EMBEDDING_DIMENSION) {
+      const message =
+        `Pinecone index "${env.pineconeIndexName}" has dimension ${actualDimension}, ` +
+        `but AuthClear's embedding model ("${env.geminiEmbeddingModel}") produces ` +
+        `${EMBEDDING_DIMENSION}-dimensional vectors. Either delete/recreate the index ` +
+        `with dimension ${EMBEDDING_DIMENSION}, or point PINECONE_INDEX_NAME at a ` +
+        "fresh index name so AuthClear can create a correctly-dimensioned one.";
+      console.error(`[PINECONE] DIMENSION MISMATCH: ${message}`);
+      throw createRetrievalError(message, "INDEX_DIMENSION_MISMATCH", {
+        expectedDimension: EMBEDDING_DIMENSION,
+        actualDimension,
+      });
+    }
+  }
+
+  retrievalState.indexExists = true;
+
+  const index = client.index(env.pineconeIndexName);
+  console.log(`[PINECONE] Connection status: connected. Using namespace="${env.pineconeNamespace}".`);
+
+  return {
+    index,
+    namespaceIndex: index.namespace(env.pineconeNamespace),
+  };
+}
+
+async function getNamespaceVectorCount(index) {
+  const stats = await index.describeIndexStats();
+  const vectorCount = Number(stats.namespaces?.[env.pineconeNamespace]?.recordCount || 0);
+  retrievalState.vectorCount = vectorCount;
+  console.log(`[PINECONE] Namespace "${env.pineconeNamespace}" currently has ${vectorCount} vector(s).`);
+  return vectorCount;
+}
+
+async function upsertVectors(namespaceIndex, records) {
+  console.log(`[PINECONE] Upserting ${records.length} vector(s) into namespace "${env.pineconeNamespace}"...`);
+  await namespaceIndex.upsert(records);
+  console.log("[PINECONE] Upsert complete.");
+}
+
+/**
+ * Syncs the bundled policy corpus into Pinecone. On ANY failure this now
+ * throws an explicit error with a full stack trace — it no longer catches
+ * the error and silently reports a "local-catalog" mode.
+ */
 async function syncPolicyCatalog(options = {}) {
   const { force = false } = options;
   const syncStarted = performance.now();
 
-  try {
-    log("INFO", "retrieval.sync.start", {
-      force,
-      policyCount: policyCatalog.length,
-      namespace: env.pineconeNamespace,
-    });
+  log("INFO", "retrieval.sync.start", {
+    force,
+    policyCount: policyCatalog.length,
+    namespace: env.pineconeNamespace,
+  });
 
-    const { index, namespaceIndex } = await ensurePolicyIndex();
-    const existingCount = await getNamespaceVectorCount(index);
+  const { index, namespaceIndex } = await ensurePolicyIndex();
+  const existingCount = await getNamespaceVectorCount(index);
 
-    if (!force && existingCount >= policyCatalog.length) {
-      retrievalState.ready = true;
-      retrievalState.mode = "pinecone";
-      retrievalState.lastSyncAt = new Date().toISOString();
-      retrievalState.lastError = null;
-      retrievalState.fallbackActivated = false;
-
-      log("INFO", "retrieval.sync.skip", {
-        reason: "sufficient_vectors",
-        existingCount,
-        latencyMs: Math.round(performance.now() - syncStarted),
-      });
-
-      return {
-        indexed: false,
-        count: existingCount,
-        mode: "pinecone",
-        ready: true,
-      };
-    }
-
-    const chunks = policyCatalog.map(buildPolicyChunk);
-    const vectors = await embedPolicyChunks(chunks);
-
-    const records = vectors.map((values, indexPosition) => {
-      const policy = policyCatalog[indexPosition];
-      return {
-        id: policy.id,
-        values,
-        metadata: {
-          policyId: policy.id,
-          source: policy.source,
-          procedure: policy.procedure,
-          procedureNormalized: normalizeText(policy.procedure),
-          allowedDiagnoses: policy.allowedDiagnoses,
-          allowedDiagnosesNormalized: policy.allowedDiagnoses.map(normalizeText),
-          keywords: policy.keywords || [],
-          keywordsNormalized: (policy.keywords || []).map(normalizeText),
-          minDurationMonths: policy.minDurationMonths,
-          ageMin: policy.ageMin,
-          ageMax: policy.ageMax,
-          policyClause: policy.policyClause,
-          chunkText: chunks[indexPosition],
-        },
-      };
-    });
-
-    await upsertVectors(namespaceIndex, records);
-    const vectorCount = await getNamespaceVectorCount(index);
-
-    retrievalState.ready = vectorCount > 0;
-    retrievalState.mode = retrievalState.ready ? "pinecone" : "unavailable";
+  if (!force && existingCount >= policyCatalog.length) {
+    retrievalState.ready = true;
+    retrievalState.mode = "pinecone";
     retrievalState.lastSyncAt = new Date().toISOString();
-    retrievalState.lastError = retrievalState.ready
-      ? null
-      : "No vectors available in Pinecone namespace after upsert.";
+    retrievalState.lastError = null;
+    retrievalState.lastErrorCode = null;
     retrievalState.fallbackActivated = false;
 
-    log("INFO", "retrieval.sync.complete", {
-      indexedCount: records.length,
-      namespaceVectorCount: vectorCount,
-      ready: retrievalState.ready,
+    console.log(`[PINECONE] Sync skipped — namespace already has ${existingCount} vector(s) (>= ${policyCatalog.length} expected).`);
+    log("INFO", "retrieval.sync.skip", {
+      reason: "sufficient_vectors",
+      existingCount,
       latencyMs: Math.round(performance.now() - syncStarted),
     });
-
-    if (!retrievalState.ready) {
-      throw createRetrievalError(
-        "Pinecone retrieval is not ready because no vectors are available.",
-        "EMPTY_NAMESPACE",
-      );
-    }
-
-    return {
-      indexed: true,
-      count: records.length,
-      mode: "pinecone",
-      ready: true,
-    };
-  } catch (error) {
-    retrievalState.ready = false;
-    retrievalState.mode = env.allowDegradedAiFallback ? "local-catalog" : "unavailable";
-    retrievalState.lastError = sanitizeFallbackReason(error.message);
-    retrievalState.lastSyncAt = new Date().toISOString();
-
-    log("ERROR", "retrieval.sync.failed", {
-      namespace: env.pineconeNamespace,
-      fallbackEnabled: env.allowDegradedAiFallback,
-      latencyMs: Math.round(performance.now() - syncStarted),
-    }, error);
 
     return {
       indexed: false,
-      count: policyCatalog.length,
-      mode: env.allowDegradedAiFallback ? "local-catalog" : "unavailable",
-      error: sanitizeFallbackReason(error.message),
-      errorCode: error.code || null,
-      ready: false,
+      count: existingCount,
+      mode: "pinecone",
+      ready: true,
     };
   }
+
+  const chunks = policyCatalog.map(buildPolicyChunk);
+
+  console.log(`[EMBEDDING] Generating embeddings for ${chunks.length} policy chunk(s)...`);
+  const vectors = await embedPolicyChunks(chunks);
+  console.log(`[EMBEDDING] Generation success — produced ${vectors.length} vector(s), dimension=${vectors[0]?.length ?? "unknown"}.`);
+
+  if (vectors[0] && vectors[0].length !== EMBEDDING_DIMENSION) {
+    throw createRetrievalError(
+      `Embedding model returned ${vectors[0].length}-dimensional vectors but ` +
+      `AuthClear expects ${EMBEDDING_DIMENSION}. Check GEMINI_EMBEDDING_MODEL ` +
+      "and the outputDimensionality setting in embeddingService.js.",
+      "EMBEDDING_DIMENSION_MISMATCH",
+    );
+  }
+
+  const records = vectors.map((values, indexPosition) => {
+    const policy = policyCatalog[indexPosition];
+    return {
+      id: policy.id,
+      values,
+      metadata: {
+        policyId: policy.id,
+        source: policy.source,
+        procedure: policy.procedure,
+        procedureNormalized: normalizeText(policy.procedure),
+        allowedDiagnoses: policy.allowedDiagnoses,
+        allowedDiagnosesNormalized: policy.allowedDiagnoses.map(normalizeText),
+        keywords: policy.keywords || [],
+        keywordsNormalized: (policy.keywords || []).map(normalizeText),
+        minDurationMonths: policy.minDurationMonths,
+        ageMin: policy.ageMin,
+        ageMax: policy.ageMax,
+        policyClause: policy.policyClause,
+        chunkText: chunks[indexPosition],
+      },
+    };
+  });
+
+  await upsertVectors(namespaceIndex, records);
+  const vectorCount = await getNamespaceVectorCount(index);
+
+  retrievalState.ready = vectorCount > 0;
+  retrievalState.mode = retrievalState.ready ? "pinecone" : "unavailable";
+  retrievalState.lastSyncAt = new Date().toISOString();
+  retrievalState.lastError = retrievalState.ready
+    ? null
+    : "No vectors available in Pinecone namespace after upsert.";
+  retrievalState.lastErrorCode = retrievalState.ready ? null : "EMPTY_NAMESPACE";
+  retrievalState.fallbackActivated = false;
+
+  log("INFO", "retrieval.sync.complete", {
+    indexedCount: records.length,
+    namespaceVectorCount: vectorCount,
+    ready: retrievalState.ready,
+    latencyMs: Math.round(performance.now() - syncStarted),
+  });
+
+  if (!retrievalState.ready) {
+    throw createRetrievalError(
+      "Pinecone retrieval is not ready because no vectors are available after upsert.",
+      "EMPTY_NAMESPACE",
+    );
+  }
+
+  return {
+    indexed: true,
+    count: records.length,
+    mode: "pinecone",
+    ready: true,
+  };
 }
 
+/**
+ * Runs the actual RAG retrieval step for a single claim.
+ *
+ * IMPORTANT: this function NEVER catches a Pinecone/embedding failure and
+ * substitutes the local policy catalog. Any failure — auth, network,
+ * dimension mismatch, empty result set, malformed metadata — is rethrown
+ * as an explicit error with a full stack trace, and the request fails
+ * with an HTTP 503. There is no silent degrade path left.
+ */
 async function retrieveRelevantPolicy(extractedData) {
   const retrievalStarted = performance.now();
 
@@ -423,11 +433,22 @@ async function retrieveRelevantPolicy(extractedData) {
     const { namespaceIndex } = await ensurePolicyIndex();
     const queryText = buildQueryText(extractedData);
 
+    console.log(`[EMBEDDING] Generating query embedding: "${queryText.slice(0, 80).replace(/\n/g, " ")}..."`);
     log("INFO", "retrieval.query.embed.start", {
       queryPreview: queryText.slice(0, 120),
     });
 
     const queryVector = await embedQuery(queryText);
+    console.log(`[EMBEDDING] Generation success — query vector dimension=${queryVector.length}.`);
+
+    if (queryVector.length !== EMBEDDING_DIMENSION) {
+      throw createRetrievalError(
+        `Query embedding returned dimension ${queryVector.length}, expected ${EMBEDDING_DIMENSION}.`,
+        "EMBEDDING_DIMENSION_MISMATCH",
+      );
+    }
+
+    console.log(`[PINECONE] Executing vector search (topK=3) against namespace "${env.pineconeNamespace}"...`);
     const response = await namespaceIndex.query({
       vector: queryVector,
       topK: 3,
@@ -435,6 +456,7 @@ async function retrieveRelevantPolicy(extractedData) {
     });
 
     const matches = response.matches || [];
+    console.log(`[PINECONE] Vector search complete — retrieved ${matches.length} document(s).`);
 
     log("INFO", "retrieval.query.complete", {
       retrievedDocumentCount: matches.length,
@@ -442,12 +464,10 @@ async function retrieveRelevantPolicy(extractedData) {
     });
 
     if (matches.length === 0) {
-      const notFound = createRetrievalError(
-        "No matching policy clause was found in Pinecone.",
+      throw createRetrievalError(
+        "No matching policy clause was found in Pinecone for this query.",
         "NO_MATCHES",
       );
-      notFound.statusCode = 404;
-      throw notFound;
     }
 
     const candidates = matches
@@ -456,17 +476,16 @@ async function retrieveRelevantPolicy(extractedData) {
       .sort((left, right) => rankCandidate(right, extractedData) - rankCandidate(left, extractedData));
 
     if (candidates.length === 0) {
-      const metadataError = createRetrievalError(
-        "Policy matches were returned without usable metadata.",
+      throw createRetrievalError(
+        "Pinecone matches were returned without usable metadata (policyId/policyClause missing).",
         "INVALID_METADATA",
       );
-      metadataError.statusCode = 502;
-      throw metadataError;
     }
 
     retrievalState.ready = true;
     retrievalState.mode = "pinecone";
     retrievalState.lastError = null;
+    retrievalState.lastErrorCode = null;
     retrievalState.fallbackActivated = false;
 
     const bestMatch = candidates[0];
@@ -478,30 +497,28 @@ async function retrieveRelevantPolicy(extractedData) {
       topMatches: toTopMatches(candidates),
     };
   } catch (error) {
+    retrievalState.ready = false;
+    retrievalState.mode = "unavailable";
+    retrievalState.lastError = sanitizeFallbackReason(error.message);
+    retrievalState.lastErrorCode = error.code || "RETRIEVAL_FAILED";
+    retrievalState.fallbackActivated = false;
+
+    console.error(`[PINECONE] Retrieval FAILED — no fallback will be used. Reason: ${error.message}`);
     log("ERROR", "retrieval.query.failed", {
-      fallbackEnabled: env.allowDegradedAiFallback,
       latencyMs: Math.round(performance.now() - retrievalStarted),
+      code: error.code || null,
     }, error);
 
-    if (!env.allowDegradedAiFallback) {
-      throw createRetrievalError(
-        "Pinecone retrieval failed and degraded fallback is disabled.",
-        error.code || "RETRIEVAL_FAILED",
-        {
-          reason: sanitizeFallbackReason(error.message),
-        },
-      );
-    }
-
-    retrievalState.fallbackActivated = true;
-    retrievalState.mode = "local-catalog";
-    retrievalState.lastError = sanitizeFallbackReason(error.message);
-
-    log("WARN", "retrieval.fallback.activated", {
-      reason: sanitizeFallbackReason(error.message),
-    });
-
-    return retrieveLocalPolicy(extractedData, error.message);
+    // Permanently disabled: this used to catch here and call
+    // retrieveLocalPolicy(extractedData, error.message) when
+    // ALLOW_DEGRADED_AI_FALLBACK was true. That silent-degrade path has
+    // been removed. Pinecone failures are always fatal to the request.
+    throw createRetrievalError(
+      `Pinecone retrieval failed: ${error.message}`,
+      error.code || "RETRIEVAL_FAILED",
+      { reason: sanitizeFallbackReason(error.message) },
+      error,
+    );
   }
 }
 
