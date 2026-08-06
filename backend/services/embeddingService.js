@@ -16,14 +16,11 @@ function getEmbeddingsClient() {
       throw error;
     }
 
-    console.log(`[EMBEDDING] Initializing embeddings client (model=${env.geminiEmbeddingModel}, outputDimensionality=${EMBEDDING_DIMENSION})...`);
+    console.log(`[EMBEDDING] Initializing embeddings client (model=${env.geminiEmbeddingModel}, targetDimensionality=${EMBEDDING_DIMENSION})...`);
     embeddings = new GoogleGenerativeAIEmbeddings({
       apiKey: env.geminiApiKey,
       model: env.geminiEmbeddingModel,
-      // gemini-embedding-001 defaults to 3072 dims; pin to 768 to match the
-      // Pinecone index dimension (uses MRL truncation). If you ever change
-      // this value, the Pinecone index dimension check in retriever.js will
-      // catch the mismatch and fail loudly instead of degrading silently.
+      // Pass this just in case future Langchain versions support it natively
       outputDimensionality: EMBEDDING_DIMENSION,
     });
     console.log("[EMBEDDING] Client initialized.");
@@ -39,7 +36,13 @@ async function embedQuery(text) {
   });
 
   try {
-    const vector = await getEmbeddingsClient().embedQuery(text);
+    let vector = await getEmbeddingsClient().embedQuery(text);
+    
+    // GUARANTEED FIX: Manually slice the array to exactly 768 dimensions
+    if (vector.length > EMBEDDING_DIMENSION) {
+      vector = vector.slice(0, EMBEDDING_DIMENSION);
+    }
+
     console.log(`[EMBEDDING] Generation success — query embedding dimension=${vector.length}.`);
 
     if (vector.length !== EMBEDDING_DIMENSION) {
@@ -63,7 +66,11 @@ async function embedPolicyChunks(chunks) {
   });
 
   try {
-    const vectors = await getEmbeddingsClient().embedDocuments(chunks);
+    let vectors = await getEmbeddingsClient().embedDocuments(chunks);
+    
+    // GUARANTEED FIX: Manually slice all vectors to exactly 768 dimensions
+    vectors = vectors.map(v => v.length > EMBEDDING_DIMENSION ? v.slice(0, EMBEDDING_DIMENSION) : v);
+
     console.log(`[EMBEDDING] Generation success — produced ${vectors.length} document embedding(s), dimension=${vectors[0]?.length ?? "unknown"}.`);
     return vectors;
   } catch (error) {
