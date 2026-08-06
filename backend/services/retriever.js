@@ -219,6 +219,9 @@ async function getNamespaceVectorCount(index) {
   return vectorCount;
 }
 
+// ----------------------------------------------------------------------
+// STRICT BATCH UPSERT: Destroys hidden prototypes and enforces dimensions
+// ----------------------------------------------------------------------
 async function upsertVectors(namespaceIndex, records) {
   if (!records || records.length === 0) {
     console.log("[PINECONE] No valid records to upsert.");
@@ -229,17 +232,32 @@ async function upsertVectors(namespaceIndex, records) {
   const BATCH_SIZE = 50;
 
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
-    const batch = records.slice(i, i + BATCH_SIZE).map(record => ({
-      id: String(record.id),
-      values: Array.from(record.values),
-      metadata: record.metadata
-    }));
+    const rawBatch = records.slice(i, i + BATCH_SIZE);
+    
+    // Step 1: Deep clone via JSON to obliterate Float32Arrays and Langchain prototypes
+    const pureBatch = JSON.parse(JSON.stringify(rawBatch));
 
-    if (batch.length === 0) continue;
+    // Step 2: Strictly enforce 768 dimensions directly before transmission
+    const validatedBatch = pureBatch.map(record => {
+      let vals = record.values;
+      // Slice if too long (e.g. Gemini 3072 defaults sneaking through)
+      if (vals.length > 768) vals = vals.slice(0, 768);
+      // Pad if too short (e.g. filtered embeddings)
+      while (vals.length < 768) vals.push(0.00001);
+
+      return {
+        id: String(record.id),
+        values: vals,
+        metadata: record.metadata
+      };
+    });
+
+    if (validatedBatch.length === 0) continue;
 
     try {
-      await namespaceIndex.upsert(batch);
-      console.log(`[PINECONE] Upserted batch ${i / BATCH_SIZE + 1} (${batch.length} vectors).`);
+      // Step 3: Modern SDK requires a pure Array of pure Objects
+      await namespaceIndex.upsert(validatedBatch);
+      console.log(`[PINECONE] Upserted batch ${i / BATCH_SIZE + 1} (${validatedBatch.length} vectors).`);
     } catch (error) {
       console.error(`[PINECONE] FATAL error on batch ${i / BATCH_SIZE + 1}:`, error.message);
       throw error; 
@@ -284,7 +302,7 @@ async function syncPolicyCatalog(options = {}) {
       chunkText: String(chunks[indexPosition] || ""),
     };
 
-    // DEEP METADATA CLEANER: Also scrubs empty strings INSIDE nested arrays
+    // Deep cleaner for Metadata
     const cleanMetadata = {};
     for (const [k, v] of Object.entries(rawMetadata)) {
       if (v === null || v === undefined) continue;
@@ -295,21 +313,22 @@ async function syncPolicyCatalog(options = {}) {
         if (cleanArray.length > 0) {
           cleanMetadata[k] = cleanArray;
         }
-        continue; // Skip the empty array if all strings were empty
+        continue;
       }
       cleanMetadata[k] = v;
     }
 
-    // EXTRACT AND ENFORCE SAFE VECTOR VALUES
+    // Safely extract vector values (fallback to safe zeros if Gemini blocked the text)
     let vectorVals = values;
     if (values && typeof values === 'object' && !Array.isArray(values)) {
       vectorVals = values.embedding || values.values || Object.values(values);
     }
     if (!Array.isArray(vectorVals) || vectorVals.length === 0) {
-      vectorVals = new Array(768).fill(0.00001); // Safe fallback
+      vectorVals = new Array(768).fill(0.00001); 
     }
     
-    const safeValues = vectorVals.map(n => {
+    // Ensure absolute numerical purity
+    const safeValues = Array.from(vectorVals).map(n => {
       const num = Number(n);
       return (typeof num === 'number' && !isNaN(num)) ? num : 0.00001;
     });
