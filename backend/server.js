@@ -1,4 +1,4 @@
- express = require("express");
+const express = require("express");
 const cors = require("cors");
 
 const { env } = require("./config/env");
@@ -86,7 +86,7 @@ async function startServer() {
         port: env.port,
       });
       resolve(server);
-    });const
+    });
 
     server.on("error", reject);
   });
