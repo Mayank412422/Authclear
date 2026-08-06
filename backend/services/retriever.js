@@ -219,6 +219,7 @@ async function getNamespaceVectorCount(index) {
   return vectorCount;
 }
 
+// THE FIX: Strict Array Mapping and removed broken fallback syntax
 async function upsertVectors(namespaceIndex, records) {
   if (!records || records.length === 0) {
     console.log("[PINECONE] No valid records to upsert.");
@@ -229,19 +230,24 @@ async function upsertVectors(namespaceIndex, records) {
   const BATCH_SIZE = 50;
 
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
-    const batch = records.slice(i, i + BATCH_SIZE);
+    // 1. Ensure a pure array of standard objects (strips hidden properties)
+    const batch = records.slice(i, i + BATCH_SIZE).map(record => ({
+      id: String(record.id),
+      values: Array.from(record.values),
+      metadata: record.metadata
+    }));
+
+    // 2. Strict empty guard
+    if (batch.length === 0) continue;
+
     try {
+      // 3. Modern SDK syntax strictly requires a flat array. No object fallbacks.
       await namespaceIndex.upsert(batch);
       console.log(`[PINECONE] Upserted batch ${i / BATCH_SIZE + 1} (${batch.length} vectors).`);
     } catch (error) {
-      if (error.message.includes("at least 1 record")) {
-        console.warn(`[PINECONE] Array syntax failed on batch ${i / BATCH_SIZE + 1}. Trying object fallback syntax...`);
-        // Fallback for older Pinecone SDK wrappers that strictly want { vectors: [...] }
-        await namespaceIndex.upsert({ vectors: batch });
-        console.log(`[PINECONE] Upserted batch ${i / BATCH_SIZE + 1} using object fallback syntax.`);
-      } else {
-        throw error;
-      }
+      console.error(`[PINECONE] FATAL error on batch ${i / BATCH_SIZE + 1}:`, error.message);
+      // Fail loudly to trigger a clean 503 instead of silent corruption
+      throw error; 
     }
   }
   console.log("[PINECONE] Upsert complete.");
