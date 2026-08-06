@@ -219,7 +219,6 @@ async function getNamespaceVectorCount(index) {
   return vectorCount;
 }
 
-// THE FIX: Strict Array Mapping and removed broken fallback syntax
 async function upsertVectors(namespaceIndex, records) {
   if (!records || records.length === 0) {
     console.log("[PINECONE] No valid records to upsert.");
@@ -230,23 +229,19 @@ async function upsertVectors(namespaceIndex, records) {
   const BATCH_SIZE = 50;
 
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
-    // 1. Ensure a pure array of standard objects (strips hidden properties)
     const batch = records.slice(i, i + BATCH_SIZE).map(record => ({
       id: String(record.id),
       values: Array.from(record.values),
       metadata: record.metadata
     }));
 
-    // 2. Strict empty guard
     if (batch.length === 0) continue;
 
     try {
-      // 3. Modern SDK syntax strictly requires a flat array. No object fallbacks.
       await namespaceIndex.upsert(batch);
       console.log(`[PINECONE] Upserted batch ${i / BATCH_SIZE + 1} (${batch.length} vectors).`);
     } catch (error) {
       console.error(`[PINECONE] FATAL error on batch ${i / BATCH_SIZE + 1}:`, error.message);
-      // Fail loudly to trigger a clean 503 instead of silent corruption
       throw error; 
     }
   }
@@ -269,7 +264,6 @@ async function syncPolicyCatalog(options = {}) {
   const chunks = policyCatalog.map(buildPolicyChunk);
   const vectors = await embedPolicyChunks(chunks);
 
-  // ULTIMATE METADATA CLEANER: Prevents Pinecone from silently dropping records
   const records = vectors.map((values, indexPosition) => {
     const policy = policyCatalog[indexPosition];
     const recordId = String(policy.id || policy.policyId || `policy-chunk-${indexPosition}`).trim();
@@ -290,19 +284,35 @@ async function syncPolicyCatalog(options = {}) {
       chunkText: String(chunks[indexPosition] || ""),
     };
 
-    // Strip ALL empty arrays, empty strings, and nulls that crash Pinecone
-    const cleanMetadata = Object.fromEntries(
-      Object.entries(rawMetadata).filter(([_, v]) => {
-        if (v === undefined || v === null) return false;
-        if (Array.isArray(v) && v.length === 0) return false; // Fixes the drop bug
-        if (typeof v === "string" && v.trim() === "") return false;
-        if (typeof v === "number" && isNaN(v)) return false;
-        return true;
-      })
-    );
+    // DEEP METADATA CLEANER: Also scrubs empty strings INSIDE nested arrays
+    const cleanMetadata = {};
+    for (const [k, v] of Object.entries(rawMetadata)) {
+      if (v === null || v === undefined) continue;
+      if (typeof v === "string" && v.trim() === "") continue;
+      if (typeof v === "number" && isNaN(v)) continue;
+      if (Array.isArray(v)) {
+        const cleanArray = v.filter(item => typeof item === "string" && item.trim() !== "");
+        if (cleanArray.length > 0) {
+          cleanMetadata[k] = cleanArray;
+        }
+        continue; // Skip the empty array if all strings were empty
+      }
+      cleanMetadata[k] = v;
+    }
 
-    // Guarantee values are pure numbers
-    const safeValues = Array.from(values).map(n => (typeof n === 'number' && !isNaN(n)) ? n : 0.00001);
+    // EXTRACT AND ENFORCE SAFE VECTOR VALUES
+    let vectorVals = values;
+    if (values && typeof values === 'object' && !Array.isArray(values)) {
+      vectorVals = values.embedding || values.values || Object.values(values);
+    }
+    if (!Array.isArray(vectorVals) || vectorVals.length === 0) {
+      vectorVals = new Array(768).fill(0.00001); // Safe fallback
+    }
+    
+    const safeValues = vectorVals.map(n => {
+      const num = Number(n);
+      return (typeof num === 'number' && !isNaN(num)) ? num : 0.00001;
+    });
 
     return {
       id: recordId,
