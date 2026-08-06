@@ -220,7 +220,7 @@ async function getNamespaceVectorCount(index) {
 }
 
 // ----------------------------------------------------------------------
-// STRICT BATCH UPSERT: Destroys hidden prototypes and enforces dimensions
+// BULLETPROOF UPSERT: Rebuilds primitives from scratch + wrapper fallback
 // ----------------------------------------------------------------------
 async function upsertVectors(namespaceIndex, records) {
   if (!records || records.length === 0) {
@@ -233,35 +233,67 @@ async function upsertVectors(namespaceIndex, records) {
 
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
     const rawBatch = records.slice(i, i + BATCH_SIZE);
-    
-    // Step 1: Deep clone via JSON to obliterate Float32Arrays and Langchain prototypes
-    const pureBatch = JSON.parse(JSON.stringify(rawBatch));
+    const finalBatch = [];
 
-    // Step 2: Strictly enforce 768 dimensions directly before transmission
-    const validatedBatch = pureBatch.map(record => {
-      let vals = record.values;
-      // Slice if too long (e.g. Gemini 3072 defaults sneaking through)
-      if (vals.length > 768) vals = vals.slice(0, 768);
-      // Pad if too short (e.g. filtered embeddings)
-      while (vals.length < 768) vals.push(0.00001);
+    // Stage 1: Build a 100% pure native object to prevent prototype leakage or Zod drops
+    for (let j = 0; j < rawBatch.length; j++) {
+      const item = rawBatch[j];
+      const cleanId = String(item.id || `chunk-${i}-${j}`).trim();
+      
+      const cleanValues = [];
+      const rawVals = item.values || [];
+      // Strictly enforce exact dimension and number types (no NaNs, no nulls)
+      for (let k = 0; k < 768; k++) {
+        let num = Number(rawVals[k]);
+        if (typeof num !== 'number' || isNaN(num) || !isFinite(num)) {
+          num = 0.00001;
+        }
+        cleanValues.push(num);
+      }
 
-      return {
-        id: String(record.id),
-        values: vals,
-        metadata: record.metadata
-      };
-    });
+      const cleanMetadata = {};
+      if (item.metadata && typeof item.metadata === 'object') {
+        for (const [mk, mv] of Object.entries(item.metadata)) {
+          if (mv === null || mv === undefined) continue;
+          if (typeof mv === 'string' && mv.trim() !== '') cleanMetadata[mk] = mv;
+          else if (typeof mv === 'number' && !isNaN(mv) && isFinite(mv)) cleanMetadata[mk] = mv;
+          else if (typeof mv === 'boolean') cleanMetadata[mk] = mv;
+          else if (Array.isArray(mv)) {
+            const arr = mv.filter(x => typeof x === 'string' && x.trim() !== '');
+            if (arr.length > 0) cleanMetadata[mk] = arr;
+          }
+        }
+      }
 
-    if (validatedBatch.length === 0) continue;
-
-    try {
-      // Step 3: Modern SDK requires a pure Array of pure Objects
-      await namespaceIndex.upsert(validatedBatch);
-      console.log(`[PINECONE] Upserted batch ${i / BATCH_SIZE + 1} (${validatedBatch.length} vectors).`);
-    } catch (error) {
-      console.error(`[PINECONE] FATAL error on batch ${i / BATCH_SIZE + 1}:`, error.message);
-      throw error; 
+      finalBatch.push({ id: cleanId, values: cleanValues, metadata: cleanMetadata });
     }
+
+    if (finalBatch.length === 0) continue;
+
+    // Stage 2: SDK Version Wrapper Fallback Logic
+    try {
+      // Try standard modern array signature
+      await namespaceIndex.upsert(finalBatch);
+    } catch (err) {
+      if (err.message && err.message.includes('at least 1 record')) {
+        console.warn(`[PINECONE] Array signature failed on batch ${i / BATCH_SIZE + 1}. Attempting SDK object wrappers...`);
+        try {
+          // Fallback for some SDK versions that expect { records: [...] }
+          await namespaceIndex.upsert({ records: finalBatch });
+        } catch (err2) {
+          try {
+             // Fallback for legacy SDK versions that expect { vectors: [...] }
+            await namespaceIndex.upsert({ vectors: finalBatch });
+          } catch (err3) {
+            console.error(`[PINECONE] All upsert signatures failed. Original error:`, err.message);
+            throw err; 
+          }
+        }
+      } else {
+        throw err;
+      }
+    }
+    console.log(`[PINECONE] Upserted batch ${i / BATCH_SIZE + 1} (${finalBatch.length} vectors).`);
   }
   console.log("[PINECONE] Upsert complete.");
 }
@@ -302,41 +334,18 @@ async function syncPolicyCatalog(options = {}) {
       chunkText: String(chunks[indexPosition] || ""),
     };
 
-    // Deep cleaner for Metadata
-    const cleanMetadata = {};
-    for (const [k, v] of Object.entries(rawMetadata)) {
-      if (v === null || v === undefined) continue;
-      if (typeof v === "string" && v.trim() === "") continue;
-      if (typeof v === "number" && isNaN(v)) continue;
-      if (Array.isArray(v)) {
-        const cleanArray = v.filter(item => typeof item === "string" && item.trim() !== "");
-        if (cleanArray.length > 0) {
-          cleanMetadata[k] = cleanArray;
-        }
-        continue;
-      }
-      cleanMetadata[k] = v;
-    }
-
-    // Safely extract vector values (fallback to safe zeros if Gemini blocked the text)
     let vectorVals = values;
     if (values && typeof values === 'object' && !Array.isArray(values)) {
       vectorVals = values.embedding || values.values || Object.values(values);
     }
-    if (!Array.isArray(vectorVals) || vectorVals.length === 0) {
-      vectorVals = new Array(768).fill(0.00001); 
+    if (!Array.isArray(vectorVals)) {
+      vectorVals = Array.from(vectorVals || []);
     }
-    
-    // Ensure absolute numerical purity
-    const safeValues = Array.from(vectorVals).map(n => {
-      const num = Number(n);
-      return (typeof num === 'number' && !isNaN(num)) ? num : 0.00001;
-    });
 
     return {
       id: recordId,
-      values: safeValues,
-      metadata: cleanMetadata,
+      values: vectorVals,
+      metadata: rawMetadata,
     };
   });
 
