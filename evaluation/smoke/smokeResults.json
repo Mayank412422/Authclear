@@ -1,0 +1,202 @@
+{
+  "executionMode": "direct-production-pipeline",
+  "measured": false,
+  "totalCases": 6,
+  "executedCases": 0,
+  "results": [
+    {
+      "caseId": "SMOKE-APPROVED-BPH",
+      "category": "approved",
+      "input": {
+        "fileName": "smoke-approved-bph.svg",
+        "mimeType": "image/svg+xml",
+        "clinicalText": "Patient PT-SMOKE-001. Diagnosis: BPH. Requested procedure: Benign Prostatic Hyperplasia Management. Symptoms for 10 months. Age 60."
+      },
+      "expectedDecision": {
+        "status": "APPROVED",
+        "reason": "Benign Prostatic Hyperplasia Management meets the duration, diagnosis, and age requirements in the selected policy clause.",
+        "policy_clause": "Covers medications, surgery, and monitoring for BPH."
+      },
+      "actualDecision": null,
+      "pass": null,
+      "extractedData": null,
+      "extractionConfidence": null,
+      "retrievedPolicy": null,
+      "decisionReason": null,
+      "decisionRule": "evaluateClaim rule order: procedure, diagnosis, duration, age",
+      "degradedOrFallbackMode": "not-executed",
+      "latencyMs": null,
+      "error": {
+        "type": "configuration_missing",
+        "message": "Real pipeline was not executed because required configuration is missing: DATABASE_URL, GEMINI_API_KEY, PINECONE_API_KEY.",
+        "missing": [
+          "DATABASE_URL",
+          "GEMINI_API_KEY",
+          "PINECONE_API_KEY"
+        ]
+      }
+    },
+    {
+      "caseId": "SMOKE-PROCEDURE-MISMATCH",
+      "category": "procedure_mismatch",
+      "input": {
+        "fileName": "smoke-procedure-mismatch.svg",
+        "mimeType": "image/svg+xml",
+        "clinicalText": "Patient PT-SMOKE-002. Diagnosis: BPH. Requested procedure: Cataract Surgery. Symptoms for 10 months. Age 60."
+      },
+      "expectedDecision": {
+        "status": "DENIED",
+        "reason": "Requested procedure Cataract Surgery does not match the retrieved coverage clause for Benign Prostatic Hyperplasia Management.",
+        "policy_clause": "Covers medications, surgery, and monitoring for BPH."
+      },
+      "actualDecision": null,
+      "pass": null,
+      "extractedData": null,
+      "extractionConfidence": null,
+      "retrievedPolicy": null,
+      "decisionReason": null,
+      "decisionRule": "evaluateClaim rule order: procedure, diagnosis, duration, age",
+      "degradedOrFallbackMode": "not-executed",
+      "latencyMs": null,
+      "error": {
+        "type": "configuration_missing",
+        "message": "Real pipeline was not executed because required configuration is missing: DATABASE_URL, GEMINI_API_KEY, PINECONE_API_KEY.",
+        "missing": [
+          "DATABASE_URL",
+          "GEMINI_API_KEY",
+          "PINECONE_API_KEY"
+        ]
+      }
+    },
+    {
+      "caseId": "SMOKE-DIAGNOSIS-MISMATCH",
+      "category": "diagnosis_mismatch",
+      "input": {
+        "fileName": "smoke-diagnosis-mismatch.svg",
+        "mimeType": "image/svg+xml",
+        "clinicalText": "Patient PT-SMOKE-003. Diagnosis: Unrelated Condition. Requested procedure: BPH Management. Symptoms for 10 months. Age 60."
+      },
+      "expectedDecision": {
+        "status": "DENIED",
+        "reason": "Diagnosis Unrelated Condition is not covered for Benign Prostatic Hyperplasia Management.",
+        "policy_clause": "Covers medications, surgery, and monitoring for BPH."
+      },
+      "actualDecision": null,
+      "pass": null,
+      "extractedData": null,
+      "extractionConfidence": null,
+      "retrievedPolicy": null,
+      "decisionReason": null,
+      "decisionRule": "evaluateClaim rule order: procedure, diagnosis, duration, age",
+      "degradedOrFallbackMode": "not-executed",
+      "latencyMs": null,
+      "error": {
+        "type": "configuration_missing",
+        "message": "Real pipeline was not executed because required configuration is missing: DATABASE_URL, GEMINI_API_KEY, PINECONE_API_KEY.",
+        "missing": [
+          "DATABASE_URL",
+          "GEMINI_API_KEY",
+          "PINECONE_API_KEY"
+        ]
+      }
+    },
+    {
+      "caseId": "SMOKE-AGE-BELOW-MIN",
+      "category": "age_below_min",
+      "input": {
+        "fileName": "smoke-age-below-min.svg",
+        "mimeType": "image/svg+xml",
+        "clinicalText": "Patient PT-SMOKE-004. Diagnosis: Osteoarthritis. Requested procedure: Osteoarthritis Management. Symptoms for 4 months. Age 39."
+      },
+      "expectedDecision": {
+        "status": "DENIED",
+        "reason": "Patient age 39 falls outside the eligible range of 40-120.",
+        "policy_clause": "Covers pain management, physiotherapy, and joint replacement for osteoarthritis."
+      },
+      "actualDecision": null,
+      "pass": null,
+      "extractedData": null,
+      "extractionConfidence": null,
+      "retrievedPolicy": null,
+      "decisionReason": null,
+      "decisionRule": "evaluateClaim rule order: procedure, diagnosis, duration, age",
+      "degradedOrFallbackMode": "not-executed",
+      "latencyMs": null,
+      "error": {
+        "type": "configuration_missing",
+        "message": "Real pipeline was not executed because required configuration is missing: DATABASE_URL, GEMINI_API_KEY, PINECONE_API_KEY.",
+        "missing": [
+          "DATABASE_URL",
+          "GEMINI_API_KEY",
+          "PINECONE_API_KEY"
+        ]
+      }
+    },
+    {
+      "caseId": "SMOKE-AGE-ABOVE-MAX",
+      "category": "age_above_max",
+      "input": {
+        "fileName": "smoke-age-above-max.svg",
+        "mimeType": "image/svg+xml",
+        "clinicalText": "Patient PT-SMOKE-005. Diagnosis: Pregnancy. Requested procedure: Cesarean Section. Symptoms for 0 months. Age 51."
+      },
+      "expectedDecision": {
+        "status": "DENIED",
+        "reason": "Patient age 51 falls outside the eligible range of 15-50.",
+        "policy_clause": "Covers cesarean delivery for indicated obstetric conditions."
+      },
+      "actualDecision": null,
+      "pass": null,
+      "extractedData": null,
+      "extractionConfidence": null,
+      "retrievedPolicy": null,
+      "decisionReason": null,
+      "decisionRule": "evaluateClaim rule order: procedure, diagnosis, duration, age",
+      "degradedOrFallbackMode": "not-executed",
+      "latencyMs": null,
+      "error": {
+        "type": "configuration_missing",
+        "message": "Real pipeline was not executed because required configuration is missing: DATABASE_URL, GEMINI_API_KEY, PINECONE_API_KEY.",
+        "missing": [
+          "DATABASE_URL",
+          "GEMINI_API_KEY",
+          "PINECONE_API_KEY"
+        ]
+      }
+    },
+    {
+      "caseId": "SMOKE-DEGRADED-INVALID-IMAGE",
+      "category": "invalid_or_degraded_extraction",
+      "input": {
+        "fileName": "smoke-invalid-image.svg",
+        "mimeType": "image/svg+xml",
+        "clinicalText": "This is intentionally not a clinical document. Extraction should fail or enter the repository's explicit degraded path."
+      },
+      "expectedDecision": {
+        "status": "DENIED",
+        "reason": "Requested procedure Unknown procedure does not match the retrieved coverage clause for Fever Treatment.",
+        "policy_clause": "Covers outpatient and inpatient treatment for fever, including diagnostic tests and medications, for all age groups."
+      },
+      "actualDecision": null,
+      "pass": null,
+      "extractedData": null,
+      "extractionConfidence": null,
+      "retrievedPolicy": null,
+      "decisionReason": null,
+      "decisionRule": "evaluateClaim rule order: procedure, diagnosis, duration, age",
+      "degradedOrFallbackMode": "not-executed",
+      "latencyMs": null,
+      "error": {
+        "type": "configuration_missing",
+        "message": "Real pipeline was not executed because required configuration is missing: DATABASE_URL, GEMINI_API_KEY, PINECONE_API_KEY.",
+        "missing": [
+          "DATABASE_URL",
+          "GEMINI_API_KEY",
+          "PINECONE_API_KEY"
+        ]
+      }
+    }
+  ],
+  "runError": "Missing configuration: DATABASE_URL, GEMINI_API_KEY, PINECONE_API_KEY",
+  "generatedAt": "2026-09-18T10:13:14.919Z"
+}

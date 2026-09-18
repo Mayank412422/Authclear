@@ -1,0 +1,146 @@
+[
+  {
+    "caseId": "SMOKE-APPROVED-BPH",
+    "category": "approved",
+    "fileName": "smoke-approved-bph.svg",
+    "mimeType": "image/svg+xml",
+    "clinicalText": "Patient PT-SMOKE-001. Diagnosis: BPH. Requested procedure: Benign Prostatic Hyperplasia Management. Symptoms for 10 months. Age 60.",
+    "expectedExtractedData": {
+      "patientId": "PT-SMOKE-001",
+      "diagnosis": "BPH",
+      "symptomDuration": 10,
+      "requestedProcedure": "Benign Prostatic Hyperplasia Management",
+      "age": 60,
+      "confidence": 0.95
+    },
+    "policy": {
+      "id": "policy-bph",
+      "procedure": "Benign Prostatic Hyperplasia Management",
+      "allowedDiagnoses": ["Benign Prostatic Hyperplasia", "BPH"],
+      "minDurationMonths": 0,
+      "ageMin": 40,
+      "ageMax": 120,
+      "clause": "Covers medications, surgery, and monitoring for BPH."
+    }
+  },
+  {
+    "caseId": "SMOKE-PROCEDURE-MISMATCH",
+    "category": "procedure_mismatch",
+    "fileName": "smoke-procedure-mismatch.svg",
+    "mimeType": "image/svg+xml",
+    "clinicalText": "Patient PT-SMOKE-002. Diagnosis: BPH. Requested procedure: Cataract Surgery. Symptoms for 10 months. Age 60.",
+    "expectedExtractedData": {
+      "patientId": "PT-SMOKE-002",
+      "diagnosis": "BPH",
+      "symptomDuration": 10,
+      "requestedProcedure": "Cataract Surgery",
+      "age": 60,
+      "confidence": 0.95
+    },
+    "policy": {
+      "id": "policy-bph",
+      "procedure": "Benign Prostatic Hyperplasia Management",
+      "allowedDiagnoses": ["Benign Prostatic Hyperplasia", "BPH"],
+      "minDurationMonths": 0,
+      "ageMin": 40,
+      "ageMax": 120,
+      "clause": "Covers medications, surgery, and monitoring for BPH."
+    }
+  },
+  {
+    "caseId": "SMOKE-DIAGNOSIS-MISMATCH",
+    "category": "diagnosis_mismatch",
+    "fileName": "smoke-diagnosis-mismatch.svg",
+    "mimeType": "image/svg+xml",
+    "clinicalText": "Patient PT-SMOKE-003. Diagnosis: Unrelated Condition. Requested procedure: BPH Management. Symptoms for 10 months. Age 60.",
+    "expectedExtractedData": {
+      "patientId": "PT-SMOKE-003",
+      "diagnosis": "Unrelated Condition",
+      "symptomDuration": 10,
+      "requestedProcedure": "Benign Prostatic Hyperplasia Management",
+      "age": 60,
+      "confidence": 0.95
+    },
+    "policy": {
+      "id": "policy-bph",
+      "procedure": "Benign Prostatic Hyperplasia Management",
+      "allowedDiagnoses": ["Benign Prostatic Hyperplasia", "BPH"],
+      "minDurationMonths": 0,
+      "ageMin": 40,
+      "ageMax": 120,
+      "clause": "Covers medications, surgery, and monitoring for BPH."
+    }
+  },
+  {
+    "caseId": "SMOKE-AGE-BELOW-MIN",
+    "category": "age_below_min",
+    "fileName": "smoke-age-below-min.svg",
+    "mimeType": "image/svg+xml",
+    "clinicalText": "Patient PT-SMOKE-004. Diagnosis: Osteoarthritis. Requested procedure: Osteoarthritis Management. Symptoms for 4 months. Age 39.",
+    "expectedExtractedData": {
+      "patientId": "PT-SMOKE-004",
+      "diagnosis": "Osteoarthritis",
+      "symptomDuration": 4,
+      "requestedProcedure": "Osteoarthritis Management",
+      "age": 39,
+      "confidence": 0.95
+    },
+    "policy": {
+      "id": "policy-arthritis-oa",
+      "procedure": "Osteoarthritis Management",
+      "allowedDiagnoses": ["Osteoarthritis"],
+      "minDurationMonths": 0,
+      "ageMin": 40,
+      "ageMax": 120,
+      "clause": "Covers pain management, physiotherapy, and joint replacement for osteoarthritis."
+    }
+  },
+  {
+    "caseId": "SMOKE-AGE-ABOVE-MAX",
+    "category": "age_above_max",
+    "fileName": "smoke-age-above-max.svg",
+    "mimeType": "image/svg+xml",
+    "clinicalText": "Patient PT-SMOKE-005. Diagnosis: Pregnancy. Requested procedure: Cesarean Section. Symptoms for 0 months. Age 51.",
+    "expectedExtractedData": {
+      "patientId": "PT-SMOKE-005",
+      "diagnosis": "Pregnancy",
+      "symptomDuration": 0,
+      "requestedProcedure": "Cesarean Section",
+      "age": 51,
+      "confidence": 0.95
+    },
+    "policy": {
+      "id": "policy-c-section",
+      "procedure": "Cesarean Section",
+      "allowedDiagnoses": ["Pregnancy", "Obstructed Labor"],
+      "minDurationMonths": 0,
+      "ageMin": 15,
+      "ageMax": 50,
+      "clause": "Covers cesarean delivery for indicated obstetric conditions."
+    }
+  },
+  {
+    "caseId": "SMOKE-DEGRADED-INVALID-IMAGE",
+    "category": "invalid_or_degraded_extraction",
+    "fileName": "smoke-invalid-image.svg",
+    "mimeType": "image/svg+xml",
+    "clinicalText": "This is intentionally not a clinical document. Extraction should fail or enter the repository's explicit degraded path.",
+    "expectedExtractedData": {
+      "patientId": "Unknown patient",
+      "diagnosis": "Unknown diagnosis",
+      "symptomDuration": 0,
+      "requestedProcedure": "Unknown procedure",
+      "age": 0,
+      "confidence": 0.1
+    },
+    "policy": {
+      "id": "policy-fever-basic",
+      "procedure": "Fever Treatment",
+      "allowedDiagnoses": ["Fever", "Pyrexia", "Viral Fever", "Bacterial Fever"],
+      "minDurationMonths": 0,
+      "ageMin": 0,
+      "ageMax": 120,
+      "clause": "Covers outpatient and inpatient treatment for fever, including diagnostic tests and medications, for all age groups."
+    }
+  }
+]
