@@ -20,3 +20,5 @@ export async function processClaim(file) {
 
   return response.data;
 }
+
+export default api;
